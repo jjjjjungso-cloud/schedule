@@ -7,6 +7,7 @@ from io import BytesIO
 # --- 1. 유틸리티 및 정제 엔진 ---
 
 def expand_date_range_with_month(date_str, year=2026):
+    """'3/30~4/10' 문자열을 날짜 리스트로 풀고, 시작일 기준의 '분석월' 반환"""
     try:
         date_str = str(date_str).replace('일', '').replace('평일', '').strip()
         if '~' not in date_str: return [], None
@@ -16,6 +17,7 @@ def expand_date_range_with_month(date_str, year=2026):
         s_month, s_day = int(s_match[0]), int(s_match[1])
         start_date = datetime(year, s_month, s_day)
         
+        # 소영님 규칙: 구간의 시작일이 속한 월을 '분석월'로 지정
         display_month = f"{year}년 {s_month}월"
         
         e_match = re.findall(r'\d+', end_part)
@@ -31,6 +33,9 @@ def expand_date_range_with_month(date_str, year=2026):
         return [], None
 
 def get_dashboard_data(uploaded_p, uploaded_a):
+    """계획표와 실제근무표를 읽어 통합 분석 데이터 생성"""
+    
+    # 1. 계획표(Plan) 정제
     all_p_sheets = pd.read_excel(uploaded_p, sheet_name=None, engine='openpyxl')
     plan_data = []
     
@@ -62,8 +67,12 @@ def get_dashboard_data(uploaded_p, uploaded_a):
                     if target_month:
                         for d in dates:
                             plan_data.append({'성함': name, '날짜': d, '계획병동': str(int(ward)), '근무조': curr_shift, '분석월': target_month})
+    
     df_p = pd.DataFrame(plan_data)
+    if not df_p.empty:
+        df_p['날짜'] = pd.to_datetime(df_p['날짜'], errors='coerce')
 
+    # 2. 실제 근무표(Actual) 정제
     all_a_sheets = pd.read_excel(uploaded_a, sheet_name=None, engine='openpyxl')
     actual_data = []
     for sheet_name, df in all_a_sheets.items():
@@ -90,7 +99,13 @@ def get_dashboard_data(uploaded_p, uploaded_a):
                     ward_match = re.search(r'/(\d+)', code)
                     if ward_match:
                         actual_data.append({'성함': name, '날짜': datetime(2026, month, day), '실제병동': str(int(ward_match.group(1)))})
+    
     df_a = pd.DataFrame(actual_data)
+    if not df_a.empty:
+        df_a['날짜'] = pd.to_datetime(df_a['날짜'], errors='coerce')
+
+    if df_p.empty or df_a.empty:
+        return pd.DataFrame()
 
     merged = pd.merge(df_a, df_p, on=['성함', '날짜'], how='left')
     merged = merged.dropna(subset=['분석월'])
@@ -109,30 +124,35 @@ with col2: up_a = st.file_uploader("2. 실제 근무표 업로드", type="xlsx")
 if up_p and up_a:
     try:
         data = get_dashboard_data(up_p, up_a)
-        months = sorted(data['분석월'].unique())
-        tabs = st.tabs(months)
         
-        for i, month_tab in enumerate(tabs):
-            with month_tab:
-                m_data = data[data['분석월'] == months[i]]
-                st.subheader(f"⚖️ {months[i]} 배정 형평성 리포트")
-                
-                # [여기가 핵심 수정 부분!] 날짜가 비어있는 경우를 대비해 pd.notna 체크를 추가했습니다.
-                summary = m_data.groupby('성함').apply(lambda x: pd.Series({
-                    '결원대체 횟수': (x['상태'] == '결원대체').sum(),
-                    '지원(순환) 횟수': (x['상태'] == '지원(순환)').sum(),
-                    '결원대체 병동 (날짜)': ", ".join([f"{row['실제병동']}({row['날짜'].strftime('%m/%d') if pd.notna(row['날짜']) else '날짜미상'})" 
-                                               for _, row in x[x['상태'] == '결원대체'].iterrows()]),
-                    '지원 병동 이력': ", ".join(sorted(set(x[x['상태'] == '지원(순환)']['실제병동'])))
-                })).reset_index()
-                
-                summary = summary.sort_values(by=['결원대체 횟수', '지원(순환) 횟수'])
-                st.table(summary)
-                
-                with st.expander("🔍 일자별 상세 내역 확인"):
-                    display_df = m_data[['날짜', '성함', '근무조', '계획병동', '실제병동', '상태']].copy()
-                    display_df['날짜'] = display_df['날짜'].dt.strftime('%Y-%m-%d')
-                    st.dataframe(display_df.sort_values(['성함', '날짜']), use_container_width=True)
+        if data.empty:
+            st.warning("데이터 매칭 결과가 없습니다. 파일의 날짜와 시트명을 확인해 주세요.")
+        else:
+            months = sorted(data['분석월'].unique())
+            tabs = st.tabs(months)
+            
+            for i, month_tab in enumerate(tabs):
+                with month_tab:
+                    m_data = data[data['분석월'] == months[i]]
+                    st.subheader(f"⚖️ {months[i]} 배정 형평성 리포트")
+                    
+                    # [수정된 부분] 날짜 변환 시 에러 방지 처리 추가
+                    summary = m_data.groupby('성함').apply(lambda x: pd.Series({
+                        '결원대체 횟수': (x['상태'] == '결원대체').sum(),
+                        '지원(순환) 횟수': (x['상태'] == '지원(순환)').sum(),
+                        '결원대체 병동 (날짜)': ", ".join([f"{row['실제병동']}({row['날짜'].strftime('%m/%d') if pd.notna(row['날짜']) and hasattr(row['날짜'], 'strftime') else '날짜미상'})" 
+                                                   for _, row in x[x['상태'] == '결원대체'].iterrows()]),
+                        '지원 병동 이력': ", ".join(sorted(set(x[x['상태'] == '지원(순환)']['실제병동'])))
+                    })).reset_index()
+                    
+                    summary = summary.sort_values(by=['결원대체 횟수', '지원(순환) 횟수'])
+                    st.table(summary)
+                    
+                    with st.expander("🔍 일자별 상세 내역 확인"):
+                        display_df = m_data[['날짜', '성함', '근무조', '계획병동', '실제병동', '상태']].copy()
+                        # 날짜 표시 형식 변환 시에도 안전장치 추가
+                        display_df['날짜'] = pd.to_datetime(display_df['날짜']).dt.strftime('%Y-%m-%d')
+                        st.dataframe(display_df.sort_values(['성함', '날짜']), use_container_width=True)
 
     except Exception as e:
         st.error(f"데이터 처리 중 오류 발생: {e}")
