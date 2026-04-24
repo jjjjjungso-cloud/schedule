@@ -59,34 +59,114 @@ exclude_names = ['고정민']
 if step == "1. 배정표(Plan) 검증":
     st.header("📋 대기배정표(Plan) 데이터 정제")
     up_p = st.file_uploader("배정표 엑셀 업로드", type="xlsx")
+
+
+    import streamlit as st
+import pandas as pd
+import re
+from datetime import datetime, timedelta
+
+def expand_dates(date_str, year=2026):
+    """'3/30~4/10' 형태의 헤더를 날짜 리스트로 변환"""
+    try:
+        # 숫자와 ~ 기호만 남기고 정리
+        clean_str = re.sub(r'[^0-9~]', '', str(date_str))
+        if '~' not in clean_str: return []
+        
+        parts = clean_str.split('~')
+        s_month, s_day = map(int, re.findall(r'\d+', parts[0]))
+        s_date = datetime(year, s_month, s_day)
+        
+        e_nums = re.findall(r'\d+', parts[1])
+        e_month = int(e_nums[0]) if len(e_nums) == 2 else s_date.month
+        e_day = int(e_nums[1]) if len(e_nums) == 2 else int(e_nums[0])
+        e_date = datetime(year, e_month, e_day)
+        
+        return [s_date + timedelta(days=x) for x in range((e_date - s_date).days + 1)]
+    except:
+        return []
+
+def extract_plan_data(uploaded_file, year):
+    # 제외 대상
+    exclude_names = ['고정민']
     
-    if up_p:
-        try:
-            p_sheets = pd.read_excel(up_p, sheet_name=None)
-            plan_list = []
-            for _, df in p_sheets.items():
-                date_cols = [i for i, c in enumerate(df.columns) if '~' in str(c)]
-                shift_idx = next((i for i, c in enumerate(df.columns) if '근무조' in str(c)), 1)
-                for _, row in df.iterrows():
-                    shift = 'D' if 'D' in str(row.iloc[shift_idx]).upper() else 'E'
-                    for c_idx in date_cols:
-                        cell_text = str(row.iloc[c_idx])
-                        match = re.search(r'(\d+)\s*[\n\r\s]+\s*([가-힣]+)', cell_text)
-                        if match:
-                            name = match.group(2)
-                            if name in exclude_names: continue
-                            dates = safe_expand_dates(df.columns[c_idx], selected_year)
-                            for d in dates:
-                                plan_list.append({'날짜': d.strftime('%Y-%m-%d'), '성함': name, '계획병동': match.group(1), '근무조': shift})
+    # 모든 시트 읽기
+    all_sheets = pd.read_excel(uploaded_file, sheet_name=None, engine='openpyxl')
+    all_results = []
+
+    for sheet_name, df in all_sheets.items():
+        # 1. '근무조' 열과 '날짜(~)' 열 위치 찾기
+        shift_col_idx = -1
+        date_cols = []
+        
+        # 헤더와 상단 10줄 스캔하여 위치 파악
+        for i in range(min(10, len(df))):
+            row_values = df.iloc[i].astype(str).tolist()
+            for j, val in enumerate(row_values):
+                if '근무조' in val: shift_col_idx = j
+                if '~' in val and j not in date_cols: date_cols.append(j)
+        
+        # 만약 헤더(columns)에 날짜가 있다면 추가
+        for j, col in enumerate(df.columns):
+            if '~' in str(col) and j not in date_cols: date_cols.append(j)
+
+        if shift_col_idx == -1: shift_col_idx = 1 # 기본값
+
+        # 2. 데이터 행 순회
+        current_shift = "D"
+        for idx, row in df.iterrows():
+            # 근무조 업데이트 (D/E)
+            shift_val = str(row.iloc[shift_col_idx]).upper()
+            if 'D' in shift_val: current_shift = "D"
+            elif 'E' in shift_val: current_shift = "E"
             
-            df_plan = pd.DataFrame(plan_list)
-            if not df_plan.empty:
-                st.success("✅ 배정표 정제 완료!")
-                st.dataframe(df_plan, use_container_width=True)
-            else:
-                st.warning("데이터를 찾을 수 없습니다. 시트의 '근무조'와 '병동\n이름' 형식을 확인하세요.")
-        except Exception as e:
-            st.error(f"오류 발생: {e}")
+            # 각 날짜 열 확인
+            for c_idx in date_cols:
+                cell_val = str(row.iloc[c_idx])
+                
+                # 핵심 패턴: [숫자(병동)] + [줄바꿈/공백] + [한글이름]
+                # 예: "72\n박소영" 또는 "101 김유진"
+                match = re.search(r'(\d+)\s*[\n\r\s]+\s*([가-힣]+)', cell_val)
+                
+                if match:
+                    ward = match.group(1)
+                    name = match.group(2)
+                    
+                    if name in exclude_names: continue
+                    
+                    # 날짜 텍스트 가져오기 (열 제목 또는 셀 자체)
+                    date_header = str(df.columns[c_idx])
+                    target_dates = expand_dates(date_header if '~' in date_header else cell_val, year)
+                    
+                    for d in target_dates:
+                        all_results.append({
+                            '날짜': d.strftime('%Y-%m-%d'),
+                            '근무조': current_shift,
+                            '이름': name,
+                            '계획병동': ward
+                        })
+                        
+    return pd.DataFrame(all_results).drop_duplicates()
+
+# --- Streamlit UI 부분 ---
+st.title("🏥 프라임 배정표 데이터 핀셋 추출기")
+selected_year = st.sidebar.selectbox("연도 설정", [2026, 2027], index=0)
+
+up_p = st.file_uploader("대기배정표(Plan) 엑셀 파일을 올려주세요", type="xlsx")
+
+if up_p:
+    with st.spinner('불필요한 데이터를 제외하고 핵심만 뽑아내는 중...'):
+        df_plan = extract_plan_data(up_p, selected_year)
+        
+    if not df_plan.empty:
+        st.success(f"✅ 총 {len(df_plan)}개의 일별 배정 데이터를 추출했습니다.")
+        st.dataframe(df_plan, use_container_width=True)
+        
+        # 간단한 요약
+        st.subheader("👤 간호사별 배정 횟수")
+        st.bar_chart(df_plan['이름'].value_counts())
+    else:
+        st.error("데이터를 찾지 못했습니다. 셀 안에 '병동번호(엔터)이름' 형식이 맞는지 확인해주세요.")
 
 # --- Step 2: 근무표(Actual)만 분석 ---
 elif step == "2. 근무표(Actual) 검증":
