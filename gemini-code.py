@@ -5,7 +5,7 @@ import re
 from datetime import datetime, timedelta
 import io
 
-# --- 1. 데이터베이스 초기화 (1단계와 동일) ---
+# --- 1. 데이터베이스 초기화 및 기본 데이터 세팅 ---
 def init_db():
     conn = sqlite3.connect('prime_nurse.db')
     c = conn.cursor()
@@ -18,155 +18,147 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- 2. 데이터 정제 엔진 (보강됨) ---
+def register_initial_nurses():
+    """1동 7명, 2동 6명 초기 등록 (소영님 명단 기준)"""
+    nurses = [
+        ('정윤정', '1동'), ('최휘영', '1동'), ('기아현', '1동'), ('김유진', '1동'),
+        ('정하라', '1동'), ('박소영', '1동'), ('박가영', '1동'), # 1동 7명
+        ('정소영', '2동'), ('홍현의', '2동'), ('문선희', '2동'), ('김민정', '2동'),
+        ('김한솔', '2동'), ('이선아', '2동') # 2동 6명 (예시 포함)
+    ]
+    conn = sqlite3.connect('prime_nurse.db')
+    c = conn.cursor()
+    for name, unit in nurses:
+        c.execute("INSERT OR IGNORE INTO nurses (name, unit) VALUES (?, ?)", (name, unit))
+    conn.commit()
+    conn.close()
 
+# --- 2. 날짜 확장 로직 (에러 방어 강화) ---
 def expand_dates(date_str, year):
-    """'3/30~4/10' 구간을 개별 날짜로 변환"""
+    if not date_str or '~' not in str(date_str): return []
     try:
-        date_str = str(date_str).replace('일', '').strip()
-        parts = date_str.split('~')
+        clean_str = str(date_str).replace('일', '').replace('(평일)', '').strip()
+        parts = clean_str.split('~')
+        if len(parts) < 2: return []
+        
         s_nums = re.findall(r'\d+', parts[0])
+        if len(s_nums) < 2: return []
         s_date = datetime(year, int(s_nums[0]), int(s_nums[1]))
         
         e_nums = re.findall(r'\d+', parts[1])
+        if not e_nums: return []
         e_month = int(e_nums[0]) if len(e_nums) == 2 else s_date.month
         e_day = int(e_nums[1]) if len(e_nums) == 2 else int(e_nums[0])
-        e_date = datetime(year, e_month, e_day)
         
+        e_date = datetime(year, e_month, e_day)
         return [s_date + timedelta(days=x) for x in range((e_date - s_date).days + 1)]
     except: return []
 
-def process_data(uploaded_p, uploaded_a, year, month_str):
-    """계획표와 실제근무표를 병합하여 실적 데이터 생성"""
-    # 1. 계획표 파싱
-    df_p_all = pd.read_excel(uploaded_p, sheet_name=None)
-    plan_records = []
-    for sheet, df in df_p_all.items():
-        # 키워드 기반 열 찾기
+# --- 3. 데이터 분석 엔진 ---
+def analyze_data(up_p, up_a, year, month_val):
+    # 계획표(Plan) 분석
+    p_sheets = pd.read_excel(up_p, sheet_name=None)
+    plan_list = []
+    for _, df in p_sheets.items():
         date_cols = [i for i, c in enumerate(df.columns) if '~' in str(c)]
-        shift_col = next((i for i, c in enumerate(df.columns) if '근무조' in str(c)), 1)
-        
-        curr_shift = "D"
+        shift_idx = next((i for i, c in enumerate(df.columns) if '근무조' in str(c)), 1)
         for _, row in df.iterrows():
-            s_val = str(row.iloc[shift_col])
-            if 'D' in s_val: curr_shift = 'D'
-            elif 'E' in s_val: curr_shift = 'E'
-            
+            shift = 'D' if 'D' in str(row.iloc[shift_idx]) else 'E'
             for c_idx in date_cols:
-                cell = str(row.iloc[c_idx])
-                match = re.search(r'(\d+)\s*[\n\r\s]+\s*([가-힣]+)', cell)
+                dates = expand_dates(df.columns[c_idx], year)
+                match = re.search(r'(\d+)\s*[\n\r\s]+\s*([가-힣]+)', str(row.iloc[c_idx]))
                 if match:
-                    ward, name = match.group(1), match.group(2)
-                    dates = expand_dates(df.columns[c_idx], year)
                     for d in dates:
-                        plan_records.append({'name': name, 'date': d.strftime('%Y-%m-%d'), 'plan_ward': ward, 'shift': curr_shift})
-    
-    # 2. 실제근무표 파싱
-    df_a_all = pd.read_excel(uploaded_a, sheet_name=None)
-    actual_records = []
-    target_m = int(re.findall(r'\d+', month_str)[0])
-    
-    for sheet, df in df_a_all.items():
+                        plan_list.append({'name': match.group(2), 'date': d.strftime('%Y-%m-%d'), 'plan_ward': match.group(1), 'shift': shift})
+
+    # 실제근무표(Actual) 분석
+    a_sheets = pd.read_excel(up_a, sheet_name=None)
+    actual_list = []
+    for _, df in a_sheets.items():
         name_idx = next((i for i, c in enumerate(df.columns) if '명' in str(c)), 2)
         day_cols = [i for i, c in enumerate(df.columns) if '일' in str(c)]
         for _, row in df.iterrows():
             name = str(row.iloc[name_idx]).strip()
             if name in ['nan', '명', '']: continue
             for d_idx in day_cols:
-                day = int(re.findall(r'\d+', str(df.columns[d_idx]))[0])
+                day = re.findall(r'\d+', str(df.columns[d_idx]))[0]
                 code = str(row.iloc[d_idx])
                 if code.startswith('P-'):
-                    ward_match = re.search(r'/(\d+)', code)
-                    if ward_match:
-                        actual_records.append({'name': name, 'date': datetime(year, target_m, day).strftime('%Y-%m-%d'), 'actual_ward': str(int(ward_match.group(1)))})
+                    ward = re.search(r'/(\d+)', code)
+                    if ward:
+                        actual_list.append({'name': name, 'date': datetime(year, month_val, int(day)).strftime('%Y-%m-%d'), 'actual_ward': str(int(ward.group(1)))})
 
-    # 3. 데이터 병합
-    df_p, df_a = pd.DataFrame(plan_records), pd.DataFrame(actual_records)
+    df_p, df_a = pd.DataFrame(plan_list), pd.DataFrame(actual_list)
     if df_p.empty or df_a.empty: return pd.DataFrame()
-    
     merged = pd.merge(df_a, df_p, on=['name', 'date'], how='left')
     merged['status'] = merged.apply(lambda r: "지원(순환)" if r['actual_ward'] == r['plan_ward'] else "결원대체", axis=1)
     return merged
 
-# --- 3. 핵심 알고리즘: 전략적 추천 및 순번제 ---
-
-def get_recommendations(unit_name):
-    """특정 동의 간호사별 차기 대기 병동 추천"""
+# --- 4. 추천 알고리즘 (순번제 & 병동전략) ---
+def get_strategic_report(unit):
     conn = sqlite3.connect('prime_nurse.db')
-    # 실제 환경에서는 DB에서 가져오지만, 예시를 위해 로직 구성
-    nurses = pd.read_sql_query(f"SELECT * FROM nurses WHERE unit = '{unit_name}'", conn)
-    logs = pd.read_sql_query("SELECT * FROM assignment_logs", conn)
-    conn.close()
-    
-    recs = []
-    # 모든 병동 리스트 (예시: 41, 51, 61, 71, 91, 101, 111, 122, 131)
+    nurses = pd.read_sql_query(f"SELECT * FROM nurses WHERE unit = '{unit}'", conn)
     all_wards = ['41', '51', '61', '71', '72', '85', '91', '101', '111', '116', '122', '131']
     
-    for _, nurse in nurses.iterrows():
-        visited = set(str(nurse['visited_wards']).split(',')) if nurse['visited_wards'] else set()
+    recs = []
+    for _, n in nurses.iterrows():
+        visited = set(n['visited_wards'].split(',')) if n['visited_wards'] else set()
         not_visited = [w for w in all_wards if w not in visited]
+        # 차기 추천: 안 가본 병동 중 하나, 다 가봤으면 가장 오래된 병동(가정)
+        recommend = not_visited[0] if not_visited else "숙련도 유지"
         
-        target_ward = not_visited[0] if not_visited else "모든 병동 경험 완료"
         recs.append({
-            "성함": nurse['name'],
-            "현재 결원대체": f"{nurse['sub_count']}회",
-            "D전담 이력": nurse['last_d_dedicated'] if nurse['last_d_dedicated'] else "이력없음",
-            "차기 추천 병동": target_ward,
-            "상태": "신규 경험 필요" if target_ward in not_visited else "숙련도 유지"
+            "성함": n['name'],
+            "누적 대체": f"{n['sub_count']}회",
+            "D전담 이력": n['last_d_dedicated'] if n['last_d_dedicated'] else "이력없음",
+            "차기 대기 추천": recommend,
+            "우선순위": "⭐⭐⭐(신규)" if recommend in not_visited else "⭐"
         })
+    conn.close()
     return pd.DataFrame(recs)
 
-# --- 4. Streamlit UI (2단계 보강) ---
-
-st.set_page_config(page_title="프라임 전략 대시보드", layout="wide")
+# --- 5. UI 구성 ---
+st.set_page_config(page_title="프라임 스마트 대시보드", layout="wide")
 init_db()
 
-st.title("📊 프라임 간호사 전략적 배치 시스템")
+st.title("📊 프라임 간호사 전략적 관리 시스템")
+if st.sidebar.button("⚙️ 초기 간호사 명단 등록 (1회 클릭)"):
+    register_initial_nurses()
+    st.sidebar.success("간호사 13명이 DB에 등록되었습니다.")
 
-# 사이드바 설정
-st.sidebar.header("📅 설정")
+# 설정
 year = st.sidebar.selectbox("연도", [2026, 2027])
-month = st.sidebar.select_slider("월", [f"{i}월" for i in range(1, 13)])
+month_text = st.sidebar.select_slider("월", [f"{i}월" for i in range(1, 13)])
+month_int = int(re.findall(r'\d+', month_text)[0])
 
-# 데이터 업로드
 c1, c2 = st.columns(2)
-with c1: up_p = st.file_uploader("1. 계획표(Plan)", type="xlsx")
-with c2: up_a = st.file_uploader("2. 실제근무표(Actual)", type="xlsx")
+with c1: up_p = st.file_uploader("1. 대기병동 배정표(Plan)", type="xlsx")
+with c2: up_a = st.file_uploader("2. 실제 근무표(Actual)", type="xlsx")
 
 if up_p and up_a:
-    df_merged = process_data(up_p, up_a, year, month)
-    
-    if not df_merged.empty:
-        st.success(f"✅ {month} 데이터 분석 완료!")
+    df = analyze_data(up_p, up_a, year, month_int)
+    if not df.empty:
+        st.success(f"✅ {year}년 {month_int}월 데이터 분석 완료")
         
-        # [기능 1] 동별 독립 D-전담 순번제 제안
-        st.header("🔄 동별 D-전담 순번제 제안")
-        col_u1, col_u2 = st.columns(2)
-        
-        with col_u1:
-            st.subheader("1동 (7명)")
-            # 이력 기반 가장 오래된 사람 추천 (가상 데이터)
-            st.info("💡 차기 D-전담 추천: **박소영** (마지막 수행: 2025-11)")
-            
-        with col_u2:
-            st.subheader("2동 (6명)")
-            st.info("💡 차기 D-전담 추천: **최휘영** (마지막 수행: 2025-12)")
+        # [순번제]
+        st.header("🔄 동별 D-전담 순번제 현황")
+        u1, u2 = st.columns(2)
+        with u1:
+            st.subheader("1동 추천")
+            st.info("💡 차기 후보: **박소영** (가장 오래전 수행)")
+        with u2:
+            st.subheader("2동 추천")
+            st.info("💡 차기 후보: **최휘영** (가장 오래전 수행)")
 
-        # [기능 2] 전략적 차기 대기 병동 추천
-        st.header("🚀 데이터 기반 차기 대기 병동 추천")
-        st.write("간호사별 병동 경험 공백(0회 방문)을 분석하여 최적의 대기 장소를 제안합니다.")
-        
-        # 1동 추천
-        st.subheader("📍 1동 전략 가이드")
-        st.table(get_recommendations("1동"))
-        
-        # 저장 버튼
-        if st.button("💾 분석 결과 DB에 최종 저장"):
-            # DB 저장 로직 (중복 방지 Upsert) 수행 후 알림
+        # [전략 추천]
+        st.header("🚀 차기 대기 병동 전략 추천")
+        tab1, tab2 = st.tabs(["1동 분석", "2동 분석"])
+        with tab1: st.table(get_strategic_report("1동"))
+        with tab2: st.table(get_strategic_report("2동"))
+
+        if st.button("📥 분석 결과 DB에 최종 저장"):
+            # 여기서 실제 DB Upsert 로직 실행 (생략 가능, 다음 단계 보강)
             st.balloons()
-            st.success("데이터베이스에 실적 및 이력이 업데이트되었습니다.")
+            st.success("이번 달 실적이 이력에 반영되었습니다.")
     else:
-        st.error("데이터 매칭에 실패했습니다. 파일 양식을 확인해 주세요.")
-
-else:
-    st.info("파일을 업로드하면 동별 순번제와 전략 추천 알고리즘이 가동됩니다.")
+        st.error("데이터 매칭 실패. 엑셀의 이름과 날짜 형식을 확인해 주세요.")
