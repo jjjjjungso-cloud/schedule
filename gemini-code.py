@@ -4,123 +4,149 @@ import re
 from datetime import datetime, timedelta
 from io import BytesIO
 
-# --- 1. 유틸리티 및 정제 엔진 ---
+# --- 1. 날짜 및 데이터 정제 엔진 ---
 
-def expand_date_range_with_month(date_str, year=2026):
-    """구간을 개별 날짜로 풀고, 시작일의 월을 '분석월'로 반환"""
+def expand_date_range(date_str, year=2026):
+    """'3/30~4/10' 같은 텍스트를 실제 날짜 리스트로 변환 """
     try:
         date_str = date_str.replace('일', '').replace('평일', '').strip()
         start_part, end_part = date_str.split('~')
+        
+        # 시작 날짜 추출
         s_match = re.findall(r'\d+', start_part)
         s_month, s_day = int(s_match[0]), int(s_match[1])
         start_date = datetime(year, s_month, s_day)
         
-        # 분석월 설정 (소영님의 규칙: 시작일 기준)
-        display_month = f"{year}년 {s_month}월"
-        
+        # 종료 날짜 추출
         e_match = re.findall(r'\d+', end_part)
-        if len(e_match) == 2:
+        if len(e_match) == 2: # '4/10' 형태
             e_month, e_day = int(e_match[0]), int(e_match[1])
-        else:
+        else: # '24' 형태 (같은 달)
             e_month, e_day = s_month, int(e_match[0])
         end_date = datetime(year, e_month, e_day)
         
-        dates = [start_date + timedelta(days=x) for x in range((end_date - start_date).days + 1)]
-        return dates, display_month
+        return [start_date + timedelta(days=x) for x in range((end_date - start_date).days + 1)]
     except:
-        return [], None
+        return []
 
-def get_dashboard_data(uploaded_p, uploaded_a):
-    # 1. 계획표(Plan) 정제
-    all_p_sheets = pd.read_excel(uploaded_p, sheet_name=None, engine='openpyxl')
-    plan_data = []
-    for sheet_name, df in all_p_sheets.items():
+def get_unified_plan(uploaded_file):
+    """계획표 정제: 날짜별 1행 데이터 생성 """
+    all_sheets = pd.read_excel(uploaded_file, sheet_name=None, engine='openpyxl')
+    plan_list = []
+
+    for sheet_name, df in all_sheets.items():
         date_cols = [i for i, col in enumerate(df.columns) if '~' in str(col)]
         shift_col = next((i for i, col in enumerate(df.columns) if '근무조' in str(col)), 1)
+        
+        current_shift = "D"
         for idx, row in df.iterrows():
-            curr_shift = "D" if 'D' in str(row[shift_col]) else "E"
+            if 'D' in str(row[shift_col]): current_shift = "D"
+            elif 'E' in str(row[shift_col]): current_shift = "E"
+            
             for col_idx in date_cols:
                 cell = str(row[col_idx])
+                # '병동\n이름' 추출 
                 match = re.search(r'(\d+)\s*\n\s*([가-힣]+)', cell)
                 if match:
                     ward, name = match.group(1), match.group(2)
-                    dates, target_month = expand_date_range_with_month(df.columns[col_idx])
+                    dates = expand_date_range(df.columns[col_idx])
                     for d in dates:
-                        plan_data.append({'성함': name, '날짜': d, '계획병동': str(int(ward)), '근무조': curr_shift, '분석월': target_month})
-    df_p = pd.DataFrame(plan_data)
+                        plan_list.append({
+                            '성함': name,
+                            '날짜': d,
+                            '계획병동': str(int(ward)),
+                            '근무조': current_shift
+                        })
+    return pd.DataFrame(plan_list)
 
-    # 2. 실제 근무표(Actual) 정제
-    all_a_sheets = pd.read_excel(uploaded_a, sheet_name=None, engine='openpyxl')
-    actual_data = []
-    for sheet_name, df in all_a_sheets.items():
-        m_match = re.findall(r'\d+', sheet_name)
-        month = int(m_match[0]) if m_match else 3
-        name_col = next((c for c in df.columns if '명' in str(c)), '명')
+def get_unified_actual(uploaded_file):
+    """실제 근무표 정제: P- 코드만 추출하여 1행 데이터 생성 """
+    all_sheets = pd.read_excel(uploaded_file, sheet_name=None, engine='openpyxl')
+    actual_list = []
+
+    for sheet_name, df in all_sheets.items():
+        month_match = re.findall(r'\d+', sheet_name)
+        if not month_match: continue
+        month = int(month_match[0])
+        
+        name_col = next((c for c in df.columns if '명' in str(c)), '명') [cite: 1]
         day_cols = [c for c in df.columns if '일' in str(c)]
+        
         for _, row in df.iterrows():
             name = row[name_col]
             if pd.isna(name): continue
-            for d_col in day_cols:
-                day = int(re.findall(r'\d+', d_col)[0])
-                code = str(row[d_col])
-                if code.startswith('P-'): # D4, D8 등 포함
-                    w_match = re.search(r'/(\d+)', code)
-                    if w_match:
-                        actual_data.append({'성함': name, '날짜': datetime(2026, month, day), '실제병동': str(int(w_match.group(1)))})
-    df_a = pd.DataFrame(actual_data)
+            
+            for day_col in day_cols:
+                day_match = re.findall(r'\d+', day_col)
+                if not day_match: continue
+                day = int(day_match[0])
+                code = str(row[day_col])
+                
+                # 'P-' 근무만 추출 (건, 필, ET 등 제외)
+                if code.startswith('P-'):
+                    ward_match = re.search(r'/(\d+)', code) [cite: 1]
+                    if ward_match:
+                        actual_list.append({
+                            '성함': name,
+                            '날짜': datetime(2026, month, day),
+                            '실제병동': str(int(ward_match.group(1)))
+                        })
+    return pd.DataFrame(actual_list)
 
-    # 3. 데이터 통합 및 분석
-    merged = pd.merge(df_a, df_p, on=['성함', '날짜'], how='left')
-    merged = merged.dropna(subset=['분석월']) # 계획 구간에 없는 날짜 제외
-    
-    def classify(row):
-        return "지원(순환)" if row['실제병동'] == row['계획병동'] else "결원대체"
-    merged['상태'] = merged.apply(classify, axis=1)
-    
-    return merged
+# --- 2. Streamlit UI 및 분석 실행 ---
 
-# --- 2. Streamlit 대시보드 화면 ---
+st.set_page_config(page_title="NSS 스마트 분석", layout="wide")
+st.title("🏥 프라임 간호사 통합 실적 분석 시스템")
 
-st.set_page_config(page_title="프라임 스마트 대시보드", layout="wide")
-st.title("📊 프라임 간호사 월별 운영 대시보드")
+st.info("💡 계획표(Plan)와 실제 근무표(Actual)를 업로드하면 날짜별로 비교 분석합니다.")
 
 col1, col2 = st.columns(2)
 with col1:
-    up_p = st.file_uploader("1. 대기병동 배정표(Plan) 업로드", type="xlsx")
+    uploaded_p = st.file_uploader("1. 대기병동 배정표(Plan) 업로드", type="xlsx")
 with col2:
-    up_a = st.file_uploader("2. 실제 근무스케줄표(Actual) 업로드", type="xlsx")
+    uploaded_a = st.file_uploader("2. 실제 근무스케줄표(Actual) 업로드", type="xlsx")
 
-if up_p and up_a:
-    data = get_dashboard_data(up_p, up_a)
-    months = sorted(data['분석월'].unique())
-    
-    # 월별 탭 생성
-    tabs = st.tabs(months)
-    
-    for i, month_tab in enumerate(tabs):
-        with month_tab:
-            m_data = data[data['분석월'] == months[i]]
+if uploaded_p and uploaded_a:
+    try:
+        # 데이터 처리
+        with st.spinner('데이터를 매칭 중입니다...'):
+            df_p = get_unified_plan(uploaded_p)
+            df_a = get_unified_actual(uploaded_a)
             
-            # 1. 형평성 지표 (결원대체 적은 순)
-            st.subheader(f"⚖️ {months[i]} 배정 형평성 순위")
-            st.caption("결원대체 횟수가 적은 분이 상단에 노출됩니다. (차기 결원 발생 시 우선 추천)")
+            # 병합 (성함과 날짜 기준)
+            merged = pd.merge(df_a, df_p, on=['성함', '날짜'], how='left')
             
-            summary = m_data.groupby('성함').apply(lambda x: pd.Series({
-                '결원대체 횟수': (x['상태'] == '결원대체').sum(),
-                '지원(순환) 횟수': (x['상태'] == '지원(순환)').sum(),
-                '결원대체 병동': ", ".join(sorted(set(x[x['상태'] == '결원대체']['실제병동']))),
-                '지원 병동(주차별)': ", ".join(sorted(set(x[x['상태'] == '지원(순환)']['실제병동'])))
-            })).reset_index()
+            # 구분 로직 적용
+            def classify(row):
+                if pd.isna(row['계획병동']): return "기타"
+                return "지원(순환)" if row['실제병동'] == row['계획병동'] else "결원대체"
             
-            summary = summary.sort_values(by='결원대체 횟수')
-            st.table(summary)
-            
-            # 2. 상세 타임라인
-            with st.expander(f"🔍 {months[i]} 상세 근무 매칭 내역 보기"):
-                st.dataframe(m_data[['날짜', '성함', '근무조', '계획병동', '실제병동', '상태']].sort_values(['성함', '날짜']), use_container_width=True)
+            merged['상태'] = merged.apply(classify, axis=1)
+            merged['날짜'] = merged['날짜'].dt.strftime('%Y-%m-%d')
 
-    # 전체 데이터 다운로드
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        data.to_excel(writer, index=False, sheet_name='통합분석결과')
-    st.download_button("📥 전체 분석 데이터 다운로드", output.getvalue(), "NSS_Final_Dashboard.xlsx")
+        # 분석 결과 리포트
+        st.header("📊 분석 요약 리포트")
+        
+        # 1. 집계 표
+        summary = merged[merged['상태'] != "기타"].groupby('성함')['상태'].value_counts().unstack().fillna(0)
+        st.subheader("✅ 간호사별 최종 실적")
+        st.table(summary.astype(int))
+
+        # 2. 상세 내역 (검색/필터 가능)
+        st.subheader("📝 날짜별 상세 비교 내역")
+        target_nurse = st.selectbox("성함을 선택하여 상세 내역을 확인하세요", ["전체"] + list(merged['성함'].unique()))
+        
+        if target_nurse == "전체":
+            st.dataframe(merged[['날짜', '성함', '근무조', '계획병동', '실제병동', '상태']], use_container_width=True)
+        else:
+            filtered = merged[merged['성함'] == target_nurse]
+            st.dataframe(filtered[['날짜', '근무조', '계획병동', '실제병동', '상태']], use_container_width=True)
+
+        # 3. 다운로드 버튼
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            merged.to_excel(writer, index=False, sheet_name='분석결과')
+        st.download_button("📥 전체 분석 결과 다운로드 (Excel)", output.getvalue(), "NSS_Analysis_Result.xlsx")
+
+    except Exception as e:
+        st.error(f"오류가 발생했습니다: {e}")
