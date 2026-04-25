@@ -117,7 +117,7 @@ with tab2:
                 st.dataframe(st.session_state.df_plan_final, use_container_width=True)
             with col_res_a:
                 st.subheader("📋 정제된 근무표(실제)")
-                st.dataframe(st.session_state.df_actual_final, use_container_width=True)
+                st.dataframe(exp_matrix, use_container_width=True)
     else:
         st.warning("먼저 1단계 탭에서 두 파일을 모두 업로드해주세요.")
 
