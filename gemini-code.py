@@ -3,118 +3,88 @@ import pandas as pd
 import re
 from datetime import datetime, timedelta
 
-# --- 1. 날짜 구간 확장 (예: 4/13~24 -> 13~24일 전체 생성) ---
-def expand_date_range(date_text, year=2026):
-    if pd.isna(date_text): return []
+def expand_dates(date_text, year=2026):
+    """'3/3~3/13' 형태의 텍스트를 개별 날짜 리스트로 변환"""
     try:
-        # 숫자와 ~ 외의 모든 노이즈 제거
         clean_text = re.sub(r'[^0-9~]', '', str(date_text))
         if '~' not in clean_text: return []
-        
         parts = clean_text.split('~')
-        start_nums = re.findall(r'\d+', parts[0])
-        if len(start_nums) < 2: return []
-        s_date = datetime(year, int(start_nums[0]), int(start_nums[1]))
+        s_m, s_d = map(int, re.findall(r'\d+', parts[0]))
+        s_date = datetime(year, s_m, s_d)
         
-        end_nums = re.findall(r'\d+', parts[1])
-        if not end_nums: return []
-        # '24'만 있을 경우 시작 월을 그대로 사용
-        e_m = int(end_nums[0]) if len(end_nums) == 2 else s_date.month
-        e_d = int(end_nums[1]) if len(e_nums) == 2 else int(end_nums[0])
+        e_nums = re.findall(r'\d+', parts[1])
+        e_m = int(e_nums[0]) if len(e_nums) == 2 else s_date.month
+        e_d = int(e_nums[1]) if len(e_nums) == 2 else int(e_nums[0])
         e_date = datetime(year, e_m, e_d)
-        
         return [s_date + timedelta(days=x) for x in range((e_date - s_date).days + 1)]
     except: return []
 
-# --- 2. 울트라 핀셋 추출 로직 ---
-def ultra_extract_plan(uploaded_file, year):
-    # 엔진을 'openpyxl'로 고정하여 호환성 높임
-    all_sheets = pd.read_excel(uploaded_file, sheet_name=None, header=None, engine='openpyxl')
-    results = []
-    exclude_names = ['고정민'] # 서무 선생님 제외
-
-    for sheet_name, df in all_sheets.items():
-        if df.shape[0] < 3: continue
-        
-        # 날짜와 근무조 열 찾기
-        date_col_map = {}
-        shift_col_idx = 0
-        
-        # 상단 20줄을 뒤져서 구조 파악
-        for r_idx in range(min(20, len(df))):
-            for c_idx in range(len(df.columns)):
-                cell_val = str(df.iloc[r_idx, c_idx])
-                if '~' in cell_val:
-                    dates = expand_date_range(cell_val, year)
-                    if dates: date_col_map[c_idx] = dates
-                if '근무조' in cell_val or '조' == cell_val.strip():
-                    shift_col_idx = c_idx
-
-        # 데이터 본문 뒤지기
-        last_shift = "D"
-        for r_idx in range(len(df)):
-            # 근무조 파악 (병합된 셀 대응)
-            row_shift_val = str(df.iloc[r_idx, shift_col_idx]).upper()
-            if 'D' in row_shift_val: last_shift = "D"
-            elif 'E' in row_shift_val: last_shift = "E"
+def extract_prime_logic(uploaded_file, year):
+    # 헤더 없이 모든 칸을 읽어오기 (디버깅 화면과 동일한 구조)
+    df = pd.read_excel(uploaded_file, header=None, engine='openpyxl')
+    
+    # 1. 날짜 열(Index)과 근무조 열(Index) 찾기
+    date_cols = []
+    shift_col_idx = -1
+    
+    # 상단 10줄을 뒤져서 구조 파악
+    for r in range(min(10, len(df))):
+        row_vals = df.iloc[r].astype(str).tolist()
+        for c, val in enumerate(row_vals):
+            if '~' in val: date_cols.append(c)
+            if '근무조' in val: shift_col_idx = c
             
-            for c_idx, date_list in date_col_map.items():
-                cell_content = str(df.iloc[r_idx, c_idx])
-                if cell_content in ['nan', 'None', '']: continue
+    if shift_col_idx == -1: shift_col_idx = 2 # 스크린샷 기준 2번 열
+    
+    results = []
+    current_shift = "D" # 기본값
+    
+    # 2. 데이터 추출 (행 단위로 순회)
+    for r in range(len(df)):
+        # [세로축 로직] 근무조 열 확인 (D/E가 보이면 업데이트, None이면 유지)
+        shift_cell = str(df.iloc[r, shift_col_idx]).strip()
+        if shift_cell == 'D': current_shift = 'D'
+        elif shift_cell == 'E': current_shift = 'E'
+        # None일 때는 이전 current_shift를 그대로 사용함 (소영님 로직)
+
+        # [가로축 로직] 날짜 열들을 순회
+        for c in date_cols:
+            cell_val = str(df.iloc[r, c])
+            # '72 박소영' 패턴 찾기
+            match = re.search(r'(\d+)\s+([가-힣]{2,4})', cell_val)
+            
+            if match:
+                ward = match.group(1)
+                name = match.group(2)
                 
-                # [울트라 핀셋 정규식]
-                # (\d{2,3}): 2~3자리 병동번호
-                # [^가-힣]*?: 한글이 나오기 전까지의 모든 잡동사니(공백, 점선, 기호 등) 무시
-                # ([가-힣]{2,4}): 2~4글자 이름
-                pattern = re.compile(r'(\d{2,3})[^가-힣]*?([가-힣]{2,4})')
-                matches = pattern.finditer(cell_content)
+                # 날짜 헤더(보통 3~4번 행에 있음) 찾기
+                date_header = ""
+                for head_r in range(r):
+                    head_val = str(df.iloc[head_r, c])
+                    if '~' in head_val:
+                        date_header = head_val
+                        break
                 
-                for match in matches:
-                    ward = match.group(1)
-                    name = match.group(2)
-                    if name in exclude_names: continue
+                dates = expand_dates(date_header, year)
+                for d in dates:
+                    results.append({
+                        '날짜': d.strftime('%Y-%m-%d'),
+                        '성함': name,
+                        '계획병동': ward,
+                        '근무조': current_shift
+                    })
                     
-                    for d in date_list:
-                        results.append({
-                            '날짜': d.strftime('%Y-%m-%d'),
-                            '근무조': last_shift,
-                            '성함': name,
-                            '계획병동': ward
-                        })
-                        
     return pd.DataFrame(results).drop_duplicates()
 
-# --- 3. UI 구성 ---
-st.set_page_config(page_title="프라임 배정표 마스터", layout="wide")
-st.title("🏥 프라임 배정표 울트라 핀셋 추출기")
-st.markdown("---")
+# --- Streamlit 실행 부분 ---
+st.title("🏥 프라임 간호사 배정표 지능형 추출기")
+selected_year = st.sidebar.selectbox("연도 설정", [2026, 2027])
+up_file = st.file_uploader("배정표 엑셀 업로드", type="xlsx")
 
-col_set, col_main = st.columns([1, 3])
-
-with col_set:
-    st.subheader("⚙️ 설정")
-    selected_year = st.selectbox("연도", [2026, 2027], index=0)
-    up_file = st.file_uploader("배정표 엑셀 업로드", type="xlsx")
-
-with col_main:
-    if up_file:
-        with st.spinner('데이터를 독하게(?) 낚아채는 중...'):
-            df_plan = ultra_extract_plan(up_file, selected_year)
-            
-            if not df_plan.empty:
-                st.success(f"✅ 드디어 {len(df_plan)}개의 데이터를 완벽하게 찾아냈습니다!")
-                st.balloons() # 축하 세레머니!
-                
-                # 결과 테이블
-                st.dataframe(df_plan.sort_values(by=['날짜', '성함']), use_container_width=True)
-                
-                # 다운로드 버튼 추가
-                csv = df_plan.to_csv(index=False).encode('utf-8-sig')
-                st.download_button("📥 정제된 데이터 다운로드 (CSV)", csv, "prime_plan_data.csv", "text/csv")
-            else:
-                st.warning("아직 데이터를 찾지 못했습니다. 엑셀의 특정 칸을 복사해서 저에게 채팅으로 붙여넣어 주시면 더 정확히 분석해 드릴게요!")
-                
-                # 디버깅: 컴퓨터가 실제로는 어떻게 글자를 읽고 있는지 보여줌
-                with st.expander("🔍 컴퓨터가 읽은 원본 데이터 보기 (디버깅)"):
-                    raw_df = pd.read_excel(up_file, header=None).astype(str)
-                    st.write(raw_df.head(20))
+if up_file:
+    df_result = extract_prime_logic(up_file, selected_year)
+    if not df_result.empty:
+        st.success("✅ 소영님의 로직대로 데이터를 성공적으로 읽어왔습니다!")
+        st.dataframe(df_result, use_container_width=True)
+    else:
+        st.warning("데이터를 찾지 못했습니다. 디버깅 화면의 구조와 파일이 일치하는지 확인해주세요.")
