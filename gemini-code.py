@@ -1,295 +1,92 @@
-import streamlit as st
+# ... (기존 2단계 정제 완료 메시지 아래에 이어서 작성)
 
-import pandas as pd
+# 세션 상태에 데이터 저장 (탭 간 데이터 공유를 위해 필요)
+if 'df_actual_final' not in st.session_state:
+    st.session_state['df_actual_final'] = pd.DataFrame()
 
-import re
+# 버튼 클릭 시 세션 상태 업데이트
+if st.button("🚀 데이터 정제 및 매칭 실행"):
+    df_plan_final = expand_plan_data(df_p_raw)
+    df_actual_final = clean_actual_data(file_a, selected_year, selected_month_int)
+    st.session_state['df_actual_final'] = df_actual_final
+    # ... (기존 출력 로직)
 
-from datetime import datetime, timedelta
+# --- 3단계 탭 추가 ---
+tab3 = st.tabs(["📊 3단계: 병동별 지원 현황 분석"])[0] # 기존 탭 뒤에 추가하거나 새로 정의
 
-
-
-# --- UI 설정 ---
-
-st.set_page_config(page_title="프라임 데이터 정제 및 검증", layout="wide")
-
-
-
-# --- 유틸리티 함수: 실제 근무표 정제 (사용자 제공 로직 기반) ---
-
-def clean_actual_data(uploaded_file, year, month_int, exclude_names=[]):
-
-    """근무표 정제: P- 코드 분석 및 날짜별 데이터 변환"""
-
-    # 전체 시트를 읽어오기 위해 ExcelFile 사용
-
-    xl = pd.ExcelFile(uploaded_file)
-
-    actual_list = []
-
+with tab3:
+    df_actual = st.session_state.get('df_actual_final', pd.DataFrame())
     
-
-    for sheet_name in xl.sheet_names:
-
-        df = pd.read_excel(uploaded_file, sheet_name=sheet_name)
-
+    if not df_actual.empty:
+        st.markdown(f"### 🏥 {selected_month_int}월 지원(P-코드) 상세 분석")
         
-
-        # 이름 열 찾기 (보통 '명' 또는 '성명' 포함)
-
-        name_idx = next((i for i, c in enumerate(df.columns) if '명' in str(c)), 2)
-
-        # '일'이 들어간 날짜 열들 찾기
-
-        day_cols = [i for i, c in enumerate(df.columns) if '일' in str(c)]
-
+        # 상단 요약 지표 (Metrics)
+        total_supports = len(df_actual)
+        unique_nurses = df_actual['성함'].nunique()
+        top_ward = df_actual['병동'].value_counts().idxmax()
         
-
-        for _, row in df.iterrows():
-
-            name = str(row.iloc[name_idx]).strip()
-
-            if name in ['nan', '명', '', 'None'] or name in exclude_names:
-
-                continue
-
-                
-
-            for d_idx in day_cols:
-
-                # 열 제목에서 숫자(일)만 추출
-
-                d_match = re.findall(r'\d+', str(df.columns[d_idx]))
-
-                if not d_match: continue
-
-                
-
-                code = str(row.iloc[d_idx])
-
-                # 'P-'로 시작하는 데이터만 필터링
-
-                if code.startswith('P-'):
-
-                    ward_match = re.search(r'/(\d+)', code)
-
-                    if ward_match:
-
-                        # D4 코드인 경우 D근무로 인정, 그 외 E 등 구분
-
-                        shift = 'D' if ('D4' in code or 'D' in code) else 'E'
-
-                        try:
-
-                            date_val = datetime(year, month_int, int(d_match[0])).strftime('%Y-%m-%d')
-
-                            actual_list.append({
-
-                                '날짜': date_val,
-
-                                '성함': name,
-
-                                '근무조': shift,
-
-                                '병동': str(int(ward_match.group(1)))
-
-                            })
-
-                        except ValueError: # 31일이 없는 달 등 예외 처리
-
-                            continue
-
-                            
-
-    return pd.DataFrame(actual_list)
-
-
-
-# --- 유틸리티 함수: 배정표(계획) 펼치기 ---
-
-def expand_plan_data(df):
-
-    """시작일~종료일 범위를 하루 단위 행으로 분리"""
-
-    expanded_list = []
-
-    # 필수 컬럼 체크
-
-    required = ['시작일', '종료일', '근무조', '배정병동', '간호사 성함']
-
-    if not all(col in df.columns for col in required):
-
-        return pd.DataFrame()
-
-
-
-    for _, row in df.iterrows():
-
-        try:
-
-            start_date = pd.to_datetime(row['시작일'])
-
-            end_date = pd.to_datetime(row['종료일'])
-
-            
-
-            # 날짜 범위 생성
-
-            current_date = start_date
-
-            while current_date <= end_date:
-
-                expanded_list.append({
-
-                    '날짜': current_date.strftime('%Y-%m-%d'),
-
-                    '성함': str(row['간호사 성함']).strip(),
-
-                    '근무조': row['근무조'],
-
-                    '병동': str(row['배정병동'])
-
-                })
-
-                current_date += timedelta(days=1)
-
-        except:
-
-            continue
-
-            
-
-    return pd.DataFrame(expanded_list)
-
-
-
-# --- 메인 대시보드 ---
-
-st.title("🏥 프라임 데이터 입력 및 정합성 검증")
-
-
-
-# 사이드바: 설정
-
-st.sidebar.header("📅 분석 기준 설정")
-
-selected_year = st.sidebar.selectbox("연도", [2026, 2027], index=0)
-
-month_list = [f"{i}월" for i in range(1, 13)]
-
-selected_month_str = st.sidebar.selectbox("대상 월", month_list, index=2) # 3월 기본
-
-selected_month_int = int(re.findall(r'\d+', selected_month_str)[0])
-
-
-
-# --- 단계별 탭 구성 ---
-
-tab1, tab2 = st.tabs(["📂 1단계: 파일 업로드", "🔍 2단계: 데이터 정제 및 변환"])
-
-
-
-with tab1:
-
-    st.markdown("### 1. 배정표(계획)와 근무표(실제)를 업로드하세요.")
-
-    col_p, col_a = st.columns(2)
-
-
-
-    with col_p:
-
-        st.header("1️⃣ 배정표(계획) 업로드")
-
-        file_p = st.file_uploader("주간 배정표(.xlsx) 선택", type="xlsx", key="plan_up")
-
-        if file_p:
-
-            xl_p = pd.ExcelFile(file_p)
-
-            sheet_p = st.selectbox("분석 시트(계획)", xl_p.sheet_names, key="p_sheet")
-
-            df_p_raw = pd.read_excel(file_p, sheet_name=sheet_p)
-
-            st.success("배정표 로드 완료")
-
-
-
-    with col_a:
-
-        st.header("2️⃣ 실제 근무표(Actual) 업로드")
-
-        file_a = st.file_uploader("월간 근무표(.xlsx) 선택", type="xlsx", key="actual_up")
-
-        if file_a:
-
-            st.success("근무표 로드 완료")
-
-
-
-with tab2:
-
-    if file_p and file_a:
-
-        st.markdown("### 2. 정제된 데이터 확인")
-
-        st.info("업로드된 데이터를 '날짜-성함-근무조-병동'의 동일한 형식으로 변환한 결과입니다.")
-
+        m1, m2, m3 = st.columns(3)
+        m1.metric("총 지원 건수", f"{total_supports}건")
+        m2.metric("지원 투입 인원", f"{unique_nurses}명")
+        m3.metric("최다 지원 병동", f"{top_ward}병동")
         
-
-        # 변환 실행 버튼
-
-        if st.button("🚀 데이터 정제 및 매칭 실행"):
-
-            # 1. 배정표 정제
-
-            df_plan_final = expand_plan_data(df_p_raw)
-
-            # 2. 근무표 정제 (사용자 함수 적용)
-
-            df_actual_final = clean_actual_data(file_a, selected_year, selected_month_int)
-
-
-
-            col_res_p, col_res_a = st.columns(2)
-
-
-
-            with col_res_p:
-
-                st.subheader("📋 정제된 배정표(계획)")
-
-                if not df_plan_final.empty:
-
-                    st.dataframe(df_plan_final, use_container_width=True, height=400)
-
-                    st.caption(f"총 {len(df_plan_final)}건의 계획 데이터가 생성되었습니다.")
-
-                else:
-
-                    st.error("배정표 형식이 맞지 않습니다. 컬럼명을 확인하세요.")
-
-
-
-            with col_res_a:
-
-                st.subheader("📋 정제된 근무표(실제)")
-
-                if not df_actual_final.empty:
-
-                    st.dataframe(df_actual_final, use_container_width=True, height=400)
-
-                    st.caption(f"총 {len(df_actual_final)}건의 실제 근무 데이터(P-코드)가 추출되었습니다.")
-
-                else:
-
-                    st.warning("실제 근무표에서 'P-' 코드를 찾을 수 없습니다.")
-
+        st.divider()
+        
+        col_chart1, col_chart2 = st.columns([1, 1])
+        
+        with col_chart1:
+            st.subheader("📍 병동별 지원받은 횟수")
+            ward_counts = df_actual['병동'].value_counts().reset_index()
+            ward_counts.columns = ['병동', '지원횟수']
+            st.bar_chart(ward_counts.set_index('병동'))
             
+        with col_chart2:
+            st.subheader("👤 간호사별 지원 출동 횟수 (Top 10)")
+            nurse_counts = df_actual['성함'].value_counts().head(10).reset_index()
+            nurse_counts.columns = ['성함', '지원횟수']
+            st.bar_chart(nurse_counts.set_index('성함'))
 
-            st.divider()
-
-            st.success("✅ 데이터 정제가 완료되었습니다. 이제 두 테이블을 비교하여 정합성을 분석할 수 있습니다.")
-
+        st.divider()
+        
+        # 상세 데이터 필터링 및 테이블
+        st.subheader("🔍 상세 지원 이력 조회")
+        
+        search_col1, search_col2 = st.columns(2)
+        with search_col1:
+            selected_ward = st.multiselect("분석할 병동 선택", options=sorted(df_actual['병동'].unique()))
+        with search_col2:
+            selected_nurse = st.multiselect("특정 간호사 조회", options=sorted(df_actual['성함'].unique()))
+            
+        # 필터링 로직
+        filtered_df = df_actual.copy()
+        if selected_ward:
+            filtered_df = filtered_df[filtered_df['병동'].isin(selected_ward)]
+        if selected_nurse:
+            filtered_df = filtered_df[filtered_df['성함'].isin(selected_nurse)]
+            
+        # 결과 출력 (피벗 테이블 형태)
+        st.write(f"검색 결과: {len(filtered_df)}건")
+        
+        # 날짜별/병동별로 누가 갔는지 한눈에 보기 위한 피벗
+        if not filtered_df.empty:
+            pivot_df = filtered_df.pivot_table(
+                index=['날짜', '병동'], 
+                values='성함', 
+                aggfunc=lambda x: ", ".join(list(x))
+            ).sort_values(by='날짜', ascending=False)
+            
+            st.dataframe(pivot_df, use_container_width=True)
+            
+            # CSV 다운로드 기능
+            csv = filtered_df.to_csv(index=False).encode('utf-8-sig')
+            st.download_button(
+                label="📥 지원 현황 결과 다운로드 (CSV)",
+                data=csv,
+                file_name=f"support_analysis_{selected_month_int}월.csv",
+                mime="text/csv",
+            )
+        else:
+            st.info("조건에 맞는 데이터가 없습니다.")
+            
     else:
-
-        st.warning("먼저 1단계 탭에서 두 파일을 모두 업로드해주세요.") 
+        st.warning("2단계에서 '데이터 정제 및 매칭 실행' 버튼을 클릭해야 분석이 가능합니다.")
