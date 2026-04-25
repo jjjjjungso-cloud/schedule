@@ -1,132 +1,45 @@
 import streamlit as st
 import pandas as pd
-import re
-from datetime import datetime, timedelta
 
-# --- 1. 데이터 처리 엔진 (Logic) ---
-class NursingDataEngine:
-    def __init__(self, year=2026):
-        self.year = year
+st.title("🏥 1단계: 배정표(Plan) 데이터 확인")
 
-    def parse_work_cell(self, val):
-        """P-D4/116 같은 셀 데이터를 (근무, 병동)으로 분리"""
-        val = str(val).strip()
-        # 휴무 키워드 처리
-        off_keywords = ['건', '필', 'ET', '/', 'nan', 'None', '']
-        if not val.startswith('P-') and any(k in val for k in off_keywords):
-            return "OFF", None
+# 1. 파일 업로드
+file_p = st.file_uploader("배정표(.xlsx) 파일을 업로드하세요", type="xlsx")
+
+if file_p:
+    # 엑셀 읽기
+    xl = pd.ExcelFile(file_p)
+    selected_sheet = st.selectbox("분석할 시트를 선택하세요", xl.sheet_names)
+    df_raw = pd.read_excel(file_p, sheet_name=selected_sheet)
+
+    st.markdown("---")
+    st.subheader("🔍 원본 데이터 확인 (상위 5행)")
+    st.dataframe(df_raw.head())
+
+    # 2. 열 정제 (C, D, F, G, J, K, M, N, P, Q 삭제 후 필요한 열만 선택)
+    # E(성함/정보), H, I, L, O 열 위주로 추출 (인덱스로 접근하는 것이 안전함)
+    # 엑셀의 E열은 인덱스 4, H는 7, I는 8, L은 11, O는 14입니다.
+    
+    try:
+        # 사용자 요청에 따른 특정 열 추출
+        # E(4), H(7), I(8), L(11), O(14) 열 선택
+        df_selected = df_raw.iloc[:, [4, 7, 8, 11, 14]].copy()
         
-        # 정규식: P- 뒤의 첫 알파벳(D, E 등)과 / 뒤의 숫자(병동) 추출
-        # D4, D6 등 숫자가 붙어도 첫 글자만 가져옴
-        match = re.search(r'P-([a-zA-Z])\d*/(\d+)', val)
-        if match:
-            shift = match.group(1).upper()
-            ward = match.group(2)
-            return shift, ward
-        return "OFF", None
-
-    def expand_date_range(self, date_str):
-        """'3/3~3/13' 형태의 문자열을 개별 날짜 리스트로 변환"""
-        try:
-            start_str, end_str = date_str.split('~')
-            start_m, start_d = map(int, start_str.split('/'))
-            end_m, end_d = map(int, end_str.split('/'))
-            
-            start_date = datetime(self.year, start_m, start_d)
-            end_date = datetime(self.year, end_m, end_d)
-            
-            date_list = []
-            curr = start_date
-            while curr <= end_date:
-                date_list.append(curr.strftime('%Y-%m-%d'))
-                curr += timedelta(days=1)
-            return date_list
-        except:
-            return []
-
-    def process_actual_data(self, df, month_name):
-        """실제 근무표 정규화 (4-5월 열 기반)"""
-        rows = []
-        # C열(이름)은 index 2, H열(날짜 시작)은 index 7 가정
-        for _, row in df.iterrows():
-            name = str(row.iloc[2]).strip()
-            if name == 'nan' or not name: continue
-            
-            for col_idx in range(7, len(df.columns)):
-                day_val = str(df.columns[col_idx]).replace('일', '').strip()
-                if not day_val.isdigit(): continue
-                
-                cell_val = row.iloc[col_idx]
-                shift, ward = self.parse_work_cell(cell_val)
-                
-                if shift != "OFF":
-                    month_num = month_name.replace('월', '')
-                    date_str = f"{self.year}-{month_num.zfill(2)}-{day_val.zfill(2)}"
-                    rows.append([name, date_str, shift, ward, 'Actual'])
-        return pd.DataFrame(rows, columns=['성함', '날짜', '근무', '병동', '구분'])
-
-    def process_march_data(self, df):
-        """3월 근무표 정규화 (기간 기반)"""
-        rows = []
-        for _, row in df.iterrows():
-            name = str(row.iloc[2]).strip()
-            # 행에서 '3/3~3/13' 같은 패턴 찾기
-            for cell in row:
-                cell_str = str(cell)
-                if '~' in cell_str and '/' in cell_str:
-                    dates = self.expand_date_range(cell_str)
-                    # 해당 행의 근무조 정보 찾기 (예: D, E)
-                    shift_info = "D" if "D" in str(row.iloc[3]) else "E" 
-                    # 임의의 병동 데이터 (실제 구조에 맞춰 index 조정 필요)
-                    ward_info = str(row.iloc[4]) 
-                    
-                    for d in dates:
-                        rows.append([name, d, shift_info, ward_info, 'Actual'])
-        return pd.DataFrame(rows, columns=['성함', '날짜', '근무', '병동', '구분'])
-
-# --- 2. Streamlit UI ---
-st.set_page_config(page_title="프라임 간호사 데이터 통합 시스템", layout="wide")
-st.title("🏥 프라임 간호사 근무 데이터 통합 분석")
-
-# 사이드바 설정
-st.sidebar.header("📅 분석 설정")
-selected_year = st.sidebar.selectbox("연도", [2026, 2027], index=0)
-selected_month = st.sidebar.selectbox("대상 월", [f"{i}월" for i in range(1, 13)], index=3)
-
-engine = NursingDataEngine(year=selected_year)
-
-# 파일 업로드
-col1, col2 = st.columns(2)
-with col1:
-    file_p = st.file_uploader("1️⃣ 배정표(Plan) 업로드", type="xlsx")
-with col2:
-    file_a = st.file_uploader("2️⃣ 근무표(Actual) 업로드", type="xlsx")
-
-if file_a:
-    xl_a = pd.ExcelFile(file_a)
-    sheet_a = st.selectbox("실제 근무 시트 선택", xl_a.sheet_names)
-    df_a_raw = pd.read_excel(file_a, sheet_name=sheet_a)
-
-    # 월별 맞춤 프로세싱
-    if "3월" in selected_month:
-        df_actual_std = engine.process_march_data(df_a_raw)
-    else:
-        df_actual_std = engine.process_actual_data(df_a_raw, selected_month)
-
-    st.subheader(f"📊 {selected_month} 정제 데이터 (표준 포맷)")
-    st.dataframe(df_actual_std, use_container_width=True)
-
-    # 주차별 통계 기능
-    if not df_actual_std.empty:
-        df_actual_std['날짜'] = pd.to_datetime(df_actual_std['날짜'])
-        df_actual_std['주차'] = df_actual_std['날짜'].dt.isocalendar().week
+        # 열 이름 정리 (예시: 성함, 대기병동, 지원1, 지원2, 지원3 등)
+        # 실제 데이터 내용에 따라 이름을 붙여줍니다.
+        df_selected.columns = ['성함_정보', '데이터1', '데이터2', '데이터3', '데이터4']
         
-        st.divider()
-        st.subheader("🗓️ 주차별 지원 현황")
-        week_stats = df_actual_std.groupby(['주차', '병동']).size().unstack().fillna(0)
-        st.bar_chart(week_stats)
+        st.success("✅ 요청하신 열(E, H, I, L, O) 추출에 성공했습니다.")
+        
+        # 3. 데이터 확인 및 필터링
+        # 성함 정보가 비어있지 않은 데이터만 보기
+        df_clean = df_selected.dropna(subset=['성함_정보']).reset_index(drop=True)
+        
+        st.subheader("📋 정제된 배정표 리스트")
+        st.dataframe(df_clean, use_container_width=True)
+        
+        st.info("💡 위 표에서 '성함'과 '병동 정보'가 제대로 분리되어 보이나요? 확인 후 2단계(근무표)로 넘어가겠습니다.")
 
-if file_p and file_a:
-    if st.button("🚀 계획 대비 실제 근무 정합성 분석 시작"):
-        st.success("데이터 병합 및 분석 로직 가동 중...")
-        # 여기에 계획표 표준화(standardize_plan) 및 merge 로직 추가 가능
+    except Exception as e:
+        st.error(f"열 추출 중 오류가 발생했습니다: {e}")
+        st.warning("엑셀의 열 개수가 부족하거나 형식이 다를 수 있습니다. 업로드한 파일의 구조를 다시 확인해주세요.")
