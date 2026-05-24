@@ -52,7 +52,7 @@ def expand_generic_data(df):
     return pd.DataFrame(expanded_list)
 
 def get_refined_ward_data(uploaded_file, year, month_int):
-    """[최종 수정] CSV/Excel 모두 읽으며 '명' 열 기준 날짜 스캔으로 데이터 밀림 방지"""
+    """[날짜 중심 스캔] 데이터 밀림 방지 파싱 로직"""
     if uploaded_file.name.endswith('.csv'):
         df = pd.read_csv(uploaded_file, encoding='utf-8-sig')
     else:
@@ -63,7 +63,7 @@ def get_refined_ward_data(uploaded_file, year, month_int):
     
     processed_data = []
     
-    # [날짜 중심 스캔]
+    # [날짜 중심 스캔]: 날짜 컬럼을 기준으로 행을 순회하여 밀림 방지
     for d_col in day_cols:
         day_match = re.findall(r'\d+', str(d_col))
         if not day_match: continue
@@ -71,11 +71,12 @@ def get_refined_ward_data(uploaded_file, year, month_int):
         
         for _, row in df.iterrows():
             name = str(row[name_col]).strip()
+            # 헤더 정보나 빈 행 제외
             if name in ['nan', 'None', '', '명', '성', '월', '성명', '이름']: continue
             
             val = str(row[d_col]).strip()
             
-            # '/' 파싱 로직
+            # '/' 파싱 로직: 슬래시가 있는 경우에만 처리
             if '/' in val:
                 parts = val.split('/')
                 if len(parts) > 1:
@@ -85,7 +86,7 @@ def get_refined_ward_data(uploaded_file, year, month_int):
                         processed_data.append({
                             '날짜': datetime(year, month_int, day),
                             '성함': name,
-                            '실제병동': str(int(nums[0]))
+                            '실제병동': str(int(nums[0])) # 숫자로 변환하여 저장
                         })
     return pd.DataFrame(processed_data)
 
@@ -113,7 +114,7 @@ st.title("🏥 프라임 데이터 통합 및 배정 최적화 시스템")
 if 'df_master' not in st.session_state: st.session_state.df_master = pd.DataFrame()
 if 'df_req_next' not in st.session_state: st.session_state.df_req_next = pd.DataFrame()
 
-# 사이드바
+# 사이드바 설정
 st.sidebar.header("🛠️ 데이터 정제 설정")
 selected_year = st.sidebar.selectbox("데이터 생성 연도", [2026, 2027], index=0)
 selected_month = st.sidebar.selectbox("데이터 생성 기준 월", [f"{i}월" for i in range(1, 13)], index=3)
@@ -133,7 +134,7 @@ with tab2:
         if st.button("🚀 데이터 통합 정제 시작"):
             def load_df(f): return pd.read_csv(f) if f.name.endswith('csv') else pd.read_excel(f)
             df_p = expand_generic_data(load_df(file_p))
-            # 로버스트 파싱 함수 호출
+            # 로버스트 파싱 함수 사용
             df_a = get_refined_ward_data(file_a, selected_year, month_int)
             st.session_state.df_master = pd.merge(df_p, df_a, on=['날짜', '성함'], how='left')
             st.session_state.df_req_next = expand_generic_data(load_df(file_r))
@@ -146,6 +147,7 @@ with tab3:
         df_all['월'] = df_all['날짜'].dt.month
         selected_m = st.selectbox("분석할 월 선택", sorted(df_all['월'].unique()), format_func=lambda x: f"{x}월")
         df = df_all[df_all['월'] == selected_m].copy()
+        
         all_nurses = sorted(df_all['성함'].unique())
         all_days = range(1, 32)
         
