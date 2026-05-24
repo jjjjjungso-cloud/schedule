@@ -271,4 +271,30 @@ with tab5:
             ].copy()
             
             if not df_sub.empty:
-                st.subheader("📊 간
+                st.subheader("📊 간호사별 비상 투입 횟수 (피로도 모니터링)")
+                pivot_df = df_sub.groupby(['성함', '실제_비교']).size().unstack(fill_value=0)
+                pivot_df.columns = [f"{col}병동" for col in pivot_df.columns]
+                pivot_df['총 출동횟수'] = pivot_df.sum(axis=1)
+                
+                pivot_df = pivot_df.sort_values('총 출동횟수', ascending=False)
+                st.dataframe(pivot_df.style.background_gradient(cmap='Reds', subset=['총 출동횟수']), use_container_width=True)
+                
+                st.divider()
+                
+                st.subheader(f"📅 일자별 상세 결원대체 리스트")
+                res_df = df_sub[['날짜', '성함', '계획병동', '실제병동', '실제근무조']].copy()
+                res_df['계획병동'] = res_df['계획병동'].apply(lambda x: str(x) if '병동' in str(x) else f"{x}병동")
+                res_df['실제병동'] = res_df['실제병동'].apply(lambda x: str(x) if '병동' in str(x) else f"{x}병동")
+                res_df = res_df.rename(columns={'계획병동': '원래계획', '실제병동': '실제 근무', '실제근무조': '근무조'})
+                res_df['날짜'] = pd.to_datetime(res_df['날짜']).dt.strftime('%Y-%m-%d')
+                
+                search_nurse = st.multiselect("특정 간호사 이력 필터링", options=sorted(res_df['성함'].unique()))
+                if search_nurse:
+                    res_df = res_df[res_df['성함'].isin(search_nurse)]
+                
+                st.dataframe(res_df.sort_values('날짜', ascending=False), use_container_width=True, hide_index=True)
+                
+            else:
+                st.success("🎉 분석 결과: 계획표와 실제 근무표가 100% 일치합니다! 결원대체 파견 건이 없습니다.")
+    else:
+        st.warning("📂 1, 2단계를 통해 데이터를 먼저 통합 정제해 주세요.")
