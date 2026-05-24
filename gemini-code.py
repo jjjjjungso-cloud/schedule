@@ -17,7 +17,6 @@ WARD_TO_BLD = {ward: bld for bld, wards in WARD_GROUPS.items() for ward in wards
 VALID_WARDS = [str(w) for wards in WARD_GROUPS.values() for w in wards]
 
 # --- [유틸리티 함수] ---
-
 def expand_generic_data(df):
     """계획 데이터(Plan) 정제"""
     expanded_list = []
