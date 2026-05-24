@@ -37,22 +37,23 @@ def expand_generic_data(df):
             end_dt = pd.to_datetime(row[c_end])
             curr = start_dt
             while curr <= end_dt:
-                if curr.weekday() < 5: 
+                if curr.weekday() < 5: # 평일만
                     expanded_list.append({
                         '날짜': curr,
                         '주차': f"{curr.isocalendar().week}주차",
                         '성함': str(row[c_name]).strip() if c_name and pd.notna(row[c_name]) else "",
                         '계획근무조': str(row[c_shift]).strip(),
                         '계획병동': str(row[c_ward]).strip(),
-                        '시작일': start_dt.strftime('%Y-%m-%d'),
-                        '종료일': end_dt.strftime('%Y-%m-%d')
                     })
                 curr += timedelta(days=1)
         except: continue
     return pd.DataFrame(expanded_list)
 
 def get_refined_ward_data(uploaded_file, year, month_int):
-    """[날짜 중심 스캔] 데이터 밀림 방지 파싱 로직"""
+    """
+    [최종 파싱 코드] 
+    근무조(D/E) 무시, 날짜(열) 기준 스캔, 슬래시(/) 뒤 숫자만 추출
+    """
     if uploaded_file.name.endswith('.csv'):
         df = pd.read_csv(uploaded_file, encoding='utf-8-sig')
     else:
@@ -63,31 +64,39 @@ def get_refined_ward_data(uploaded_file, year, month_int):
     
     processed_data = []
     
-    # [날짜 중심 스캔]: 날짜 컬럼을 기준으로 행을 순회하여 밀림 방지
+    # 3. 날짜 기준 스캔: 날짜 컬럼을 하나씩 훑으며 행을 채우는 방식
     for d_col in day_cols:
+        # 컬럼명에서 숫자만 추출하여 날짜로 사용
         day_match = re.findall(r'\d+', str(d_col))
         if not day_match: continue
         day = int(day_match[0])
         
+        # 해당 날짜 열의 모든 행(간호사)을 순회
         for _, row in df.iterrows():
             name = str(row[name_col]).strip()
-            # 헤더 정보나 빈 행 제외
+            
+            # 헤더 정보나 빈 행은 제외
             if name in ['nan', 'None', '', '명', '성', '월', '성명', '이름']: continue
             
+            # 셀 값 파싱
             val = str(row[d_col]).strip()
             
             # '/' 파싱 로직: 슬래시가 있는 경우에만 처리
             if '/' in val:
                 parts = val.split('/')
+                # 슬래시 뒤쪽(parts[1])만 확인
                 if len(parts) > 1:
                     ward_part = parts[1]
+                    # 숫자만 추출 (예: '072' -> '72')
                     nums = re.findall(r'\d+', ward_part)
+                    
                     if nums:
                         processed_data.append({
                             '날짜': datetime(year, month_int, day),
                             '성함': name,
                             '실제병동': str(int(nums[0])) # 숫자로 변환하여 저장
                         })
+    
     return pd.DataFrame(processed_data)
 
 def recommend_shift_logic(history_list):
@@ -134,7 +143,7 @@ with tab2:
         if st.button("🚀 데이터 통합 정제 시작"):
             def load_df(f): return pd.read_csv(f) if f.name.endswith('csv') else pd.read_excel(f)
             df_p = expand_generic_data(load_df(file_p))
-            # 로버스트 파싱 함수 사용
+            # [최종] 로버스트 날짜 스캔 파싱 함수 사용
             df_a = get_refined_ward_data(file_a, selected_year, month_int)
             st.session_state.df_master = pd.merge(df_p, df_a, on=['날짜', '성함'], how='left')
             st.session_state.df_req_next = expand_generic_data(load_df(file_r))
