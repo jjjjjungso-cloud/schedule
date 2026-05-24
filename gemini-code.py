@@ -20,7 +20,7 @@ WARD_TO_BLD = {ward: bld for bld, wards in WARD_GROUPS.items() for ward in wards
 # --- [유틸리티 함수] ---
 
 def expand_generic_data(df):
-    """시작일~종료일 범위를 평일 단위 행으로 분리"""
+    """시작일~종료일 범위를 평일 단위 행으로 분리 및 주차 부여"""
     expanded_list = []
     required = ['시작일', '종료일', '근무조', '배정병동']
     if not all(any(req in c for c in df.columns) for req in required): return pd.DataFrame()
@@ -49,10 +49,10 @@ def expand_generic_data(df):
         except: continue
     return pd.DataFrame(expanded_list)
 
-def clean_actual_data_robust(file_path, year, month_int):
-    """[최종] 날짜(열) 기준 스캔으로 데이터 밀림 방지"""
-    df = pd.read_csv(file_path, encoding='utf-8-sig')
-    name_col = '명' # 고정
+def get_refined_ward_data(uploaded_file, year, month_int):
+    """[최종 로직] 날짜 중심 스캔으로 데이터 밀림 방지"""
+    df = pd.read_csv(uploaded_file, encoding='utf-8-sig')
+    name_col = '명' 
     day_cols = [c for c in df.columns if '일' in str(c)]
     
     processed_data = []
@@ -67,6 +67,8 @@ def clean_actual_data_robust(file_path, year, month_int):
             if name in ['nan', 'None', '', '명', '성', '월', '성명']: continue
             
             val = str(row[d_col]).strip()
+            
+            # '/' 파싱 로직: 슬래시가 있는 경우에만 처리
             if '/' in val:
                 parts = val.split('/')
                 if len(parts) > 1:
@@ -116,7 +118,7 @@ with tab1:
     st.info("💡 배정을 위해 3가지 파일을 모두 업로드하세요.")
     c1, c2, c3 = st.columns(3)
     file_p = c1.file_uploader("과거 배정표(Plan)", type=["xlsx", "csv"])
-    file_a = c2.file_uploader("과거 실제 근무표(Actual)", type=["csv"]) # CSV 권장
+    file_a = c2.file_uploader("과거 실제 근무표(Actual)", type=["csv"])
     file_r = c3.file_uploader("차월 지원 요청 파일(Request)", type=["xlsx", "csv"])
 
 with tab2:
@@ -124,8 +126,8 @@ with tab2:
         if st.button("🚀 데이터 통합 정제 시작"):
             def load_df(f): return pd.read_csv(f) if f.name.endswith('csv') else pd.read_excel(f)
             df_p = expand_generic_data(load_df(file_p))
-            # 로버스트 파싱 함수 사용
-            df_a = clean_actual_data_robust(file_a, selected_year, month_int)
+            # 로버스트 파싱 함수 호출
+            df_a = get_refined_ward_data(file_a, selected_year, month_int)
             st.session_state.df_master = pd.merge(df_p, df_a, on=['날짜', '성함'], how='left')
             st.session_state.df_req_next = expand_generic_data(load_df(file_r))
             st.success("✅ 정제 완료! 3, 4단계로 이동하세요.")
@@ -152,7 +154,43 @@ with tab3:
     else: st.info("2단계 정제를 실행하세요.")
 
 with tab4:
-    # 4단계 배정 로직은 동일
     if not st.session_state.df_master.empty and not st.session_state.df_req_next.empty:
-        # ... (생략: 기존 tab4 코드와 동일하게 유지)
-        pass
+        # 기존 배정 로직 유지
+        df_master = st.session_state.df_master
+        df_req = st.session_state.df_req_next
+        st.header("🎯 차월 배정 의사결정")
+        weeks = sorted(df_req['주차'].unique())
+        selected_week = st.selectbox("배정 주차 선택", weeks)
+        week_info = df_req[df_req['주차'] == selected_week]
+        selected_nurse = st.selectbox("간호사를 선택하세요", sorted(list(NURSE_TO_BLD.keys())))
+        
+        col_logic, col_select = st.columns(2)
+        with col_logic:
+            st.subheader("⚙️ 근무조 패턴 분석")
+            hist_list = get_recent_history_list(df_master, selected_nurse, week_info['날짜'].min())
+            rec_shift = recommend_shift_logic(hist_list)
+            st.info(f"💡 패턴 분석 결과: 차주 추천 근무는 **{rec_shift}**입니다.")
+        with col_select:
+            final_shift = st.radio("배정할 근무조 선택", ["D", "E"], index=0 if rec_shift == "D" else 1, horizontal=True)
+
+        st.divider()
+        st.subheader(f"🏥 {selected_nurse} 간호사 최적 병동 추천")
+        allow_switch = st.checkbox("🚩 타 동(Building) 스위치 허용")
+        
+        avail_today = df_req[(df_req['주차'] == selected_week) & (df_req['계획근무조'] == final_shift)]
+        if not avail_today.empty:
+            my_bld = NURSE_TO_BLD.get(selected_nurse, "1동")
+            ward_counts = df_master[df_master['성함'] == selected_nurse].groupby('계획병동').size().to_dict()
+            recommend_list = []
+            for w in avail_today['계획병동'].unique():
+                if not allow_switch and WARD_TO_BLD.get(w) != my_bld: continue
+                count = ward_counts.get(w, 0)
+                recommend_list.append({"병동": w, "소속": WARD_TO_BLD.get(w, "기타"), "누적 방문일수": count})
+            if recommend_list:
+                res_df = pd.DataFrame(recommend_list).sort_values(by="누적 방문일수")
+                st.dataframe(res_df, use_container_width=True)
+                top = res_df.iloc[0]
+                st.success(f"🏆 최종 추천: **{top['병동']}병동**")
+            else: st.warning(f"{my_bld} 내 지원 요청이 없습니다.")
+        else: st.error("해당 주차에 선택한 근무조 요청이 없습니다.")
+    else: st.info("1, 2단계를 먼저 완료해 주세요.")
