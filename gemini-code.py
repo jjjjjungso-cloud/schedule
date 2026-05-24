@@ -25,6 +25,8 @@ def expand_generic_data(df):
     required = ['시작일', '종료일', '근무조', '배정병동']
     if not all(any(req in c for c in df.columns) for req in required): return pd.DataFrame()
     
+    # 컬럼 공백 제거 및 자동 탐색
+    df.columns = df.columns.str.strip()
     c_start = next(c for c in df.columns if '시작일' in c)
     c_end = next(c for c in df.columns if '종료일' in c)
     c_shift = next(c for c in df.columns if '근무조' in c)
@@ -37,66 +39,60 @@ def expand_generic_data(df):
             end_dt = pd.to_datetime(row[c_end])
             curr = start_dt
             while curr <= end_dt:
-                if curr.weekday() < 5: # 평일만
+                if curr.weekday() < 5: 
                     expanded_list.append({
                         '날짜': curr,
                         '주차': f"{curr.isocalendar().week}주차",
                         '성함': str(row[c_name]).strip() if c_name and pd.notna(row[c_name]) else "",
                         '계획근무조': str(row[c_shift]).strip(),
                         '계획병동': str(row[c_ward]).strip(),
+                        '시작일': start_dt.strftime('%Y-%m-%d'),
+                        '종료일': end_dt.strftime('%Y-%m-%d')
                     })
                 curr += timedelta(days=1)
         except: continue
     return pd.DataFrame(expanded_list)
 
 def get_refined_ward_data(uploaded_file, year, month_int):
-    """
-    [최종 파싱 코드] 
-    근무조(D/E) 무시, 날짜(열) 기준 스캔, 슬래시(/) 뒤 숫자만 추출
-    """
+    """[최종 파싱 코드] 파일 경로 대신 uploaded_file 객체 사용, 유연한 컬럼 탐색"""
     if uploaded_file.name.endswith('.csv'):
         df = pd.read_csv(uploaded_file, encoding='utf-8-sig')
     else:
         df = pd.read_excel(uploaded_file)
         
-    name_col = '명' 
-    day_cols = [c for c in df.columns if '일' in str(c)]
+    # 컬럼 공백 제거 및 자동 탐색
+    df.columns = df.columns.str.strip()
+    name_col = next((c for c in df.columns if '명' in str(c)), None)
     
+    if name_col is None:
+        st.error("파일에서 '명'이 포함된 열을 찾을 수 없습니다. 파일 형식을 확인해주세요.")
+        return pd.DataFrame()
+
+    day_cols = [c for c in df.columns if '일' in str(c)]
     processed_data = []
     
-    # 3. 날짜 기준 스캔: 날짜 컬럼을 하나씩 훑으며 행을 채우는 방식
+    # 날짜 기준 스캔
     for d_col in day_cols:
-        # 컬럼명에서 숫자만 추출하여 날짜로 사용
         day_match = re.findall(r'\d+', str(d_col))
         if not day_match: continue
         day = int(day_match[0])
         
-        # 해당 날짜 열의 모든 행(간호사)을 순회
         for _, row in df.iterrows():
             name = str(row[name_col]).strip()
+            if name in ['nan', 'None', '', '명', '성', '월', '성명', '이름', '사 번']: continue
             
-            # 헤더 정보나 빈 행은 제외
-            if name in ['nan', 'None', '', '명', '성', '월', '성명', '이름']: continue
-            
-            # 셀 값 파싱
             val = str(row[d_col]).strip()
-            
-            # '/' 파싱 로직: 슬래시가 있는 경우에만 처리
             if '/' in val:
                 parts = val.split('/')
-                # 슬래시 뒤쪽(parts[1])만 확인
                 if len(parts) > 1:
                     ward_part = parts[1]
-                    # 숫자만 추출 (예: '072' -> '72')
                     nums = re.findall(r'\d+', ward_part)
-                    
                     if nums:
                         processed_data.append({
                             '날짜': datetime(year, month_int, day),
                             '성함': name,
-                            '실제병동': str(int(nums[0])) # 숫자로 변환하여 저장
+                            '실제병동': str(int(nums[0]))
                         })
-    
     return pd.DataFrame(processed_data)
 
 def recommend_shift_logic(history_list):
@@ -123,7 +119,6 @@ st.title("🏥 프라임 데이터 통합 및 배정 최적화 시스템")
 if 'df_master' not in st.session_state: st.session_state.df_master = pd.DataFrame()
 if 'df_req_next' not in st.session_state: st.session_state.df_req_next = pd.DataFrame()
 
-# 사이드바 설정
 st.sidebar.header("🛠️ 데이터 정제 설정")
 selected_year = st.sidebar.selectbox("데이터 생성 연도", [2026, 2027], index=0)
 selected_month = st.sidebar.selectbox("데이터 생성 기준 월", [f"{i}월" for i in range(1, 13)], index=3)
@@ -132,7 +127,7 @@ month_int = int(re.findall(r'\d+', selected_month)[0])
 tab1, tab2, tab3, tab4 = st.tabs(["📂 1단계: 업로드", "🔍 2단계: 정제", "📊 3단계: 분석", "🎯 4단계: 배정"])
 
 with tab1:
-    st.info("💡 배정을 위해 3가지 파일을 모두 업로드하세요.")
+    st.info("💡 파일을 업로드하세요.")
     c1, c2, c3 = st.columns(3)
     file_p = c1.file_uploader("과거 배정표(Plan)", type=["xlsx", "csv"])
     file_a = c2.file_uploader("과거 실제 근무표(Actual)", type=["xlsx", "csv"])
@@ -143,11 +138,11 @@ with tab2:
         if st.button("🚀 데이터 통합 정제 시작"):
             def load_df(f): return pd.read_csv(f) if f.name.endswith('csv') else pd.read_excel(f)
             df_p = expand_generic_data(load_df(file_p))
-            # [최종] 로버스트 날짜 스캔 파싱 함수 사용
+            # [최종] 로버스트 함수 적용
             df_a = get_refined_ward_data(file_a, selected_year, month_int)
             st.session_state.df_master = pd.merge(df_p, df_a, on=['날짜', '성함'], how='left')
             st.session_state.df_req_next = expand_generic_data(load_df(file_r))
-            st.success("✅ 정제 완료! 3, 4단계로 이동하세요.")
+            st.success("✅ 정제 완료!")
     else: st.warning("파일을 모두 업로드해 주세요.")
 
 with tab3:
@@ -156,11 +151,10 @@ with tab3:
         df_all['월'] = df_all['날짜'].dt.month
         selected_m = st.selectbox("분석할 월 선택", sorted(df_all['월'].unique()), format_func=lambda x: f"{x}월")
         df = df_all[df_all['월'] == selected_m].copy()
-        
         all_nurses = sorted(df_all['성함'].unique())
         all_days = range(1, 32)
         
-        s1, s2, s3 = st.tabs(["1. 간호사별 지원일수", "2. 월별 배정병동", "3. 월별 실제 근무표"])
+        s1, s2, s3 = st.tabs(["1. 지원일수", "2. 배정병동", "3. 실제근무"])
         with s1:
             st.dataframe(df.groupby(['성함', '계획병동']).size().unstack(fill_value=0), use_container_width=True)
         with s2:
@@ -183,16 +177,15 @@ with tab4:
         
         col_logic, col_select = st.columns(2)
         with col_logic:
-            st.subheader("⚙️ 근무조 패턴 분석")
             hist_list = get_recent_history_list(df_master, selected_nurse, week_info['날짜'].min())
             rec_shift = recommend_shift_logic(hist_list)
-            st.info(f"💡 패턴 분석 결과: 차주 추천 근무는 **{rec_shift}**입니다.")
+            st.info(f"💡 차주 추천 근무: **{rec_shift}**")
         with col_select:
-            final_shift = st.radio("배정할 근무조 선택", ["D", "E"], index=0 if rec_shift == "D" else 1, horizontal=True)
+            final_shift = st.radio("배정 근무 선택", ["D", "E"], index=0 if rec_shift == "D" else 1, horizontal=True)
 
         st.divider()
-        st.subheader(f"🏥 {selected_nurse} 간호사 최적 병동 추천")
-        allow_switch = st.checkbox("🚩 타 동(Building) 스위치 허용")
+        st.subheader(f"🏥 {selected_nurse} 최적 병동 추천")
+        allow_switch = st.checkbox("🚩 타 동 스위치 허용")
         
         avail_today = df_req[(df_req['주차'] == selected_week) & (df_req['계획근무조'] == final_shift)]
         if not avail_today.empty:
@@ -208,6 +201,5 @@ with tab4:
                 st.dataframe(res_df, use_container_width=True)
                 top = res_df.iloc[0]
                 st.success(f"🏆 최종 추천: **{top['병동']}병동**")
-            else: st.warning(f"{my_bld} 내 지원 요청이 없습니다.")
-        else: st.error("해당 주차에 선택한 근무조 요청이 없습니다.")
-    else: st.info("1, 2단계를 먼저 완료해 주세요.")
+            else: st.warning("지원 요청이 없습니다.")
+        else: st.error("해당 주차 요청이 없습니다.")
