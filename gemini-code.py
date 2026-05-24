@@ -132,9 +132,10 @@ if 'df_master' not in st.session_state: st.session_state.df_master = pd.DataFram
 if 'df_req_next' not in st.session_state: st.session_state.df_req_next = pd.DataFrame()
 
 # 사이드바 설정
-st.sidebar.header("📅 기준 설정")
-selected_year = st.sidebar.selectbox("연도", [2026, 2027], index=0)
-selected_month = st.sidebar.selectbox("과거 실제근무 기준 월", [f"{i}월" for i in range(1, 13)], index=2)
+st.sidebar.header("🛠️ 데이터 정제 설정")
+st.sidebar.caption("업로드할 엑셀 파일의 날짜 기준을 설정하세요.")
+selected_year = st.sidebar.selectbox("데이터 생성 연도", [2026, 2027], index=0)
+selected_month = st.sidebar.selectbox("데이터 생성 기준 월", [f"{i}월" for i in range(1, 13)], index=3)
 month_int = int(re.findall(r'\d+', selected_month)[0])
 
 tab1, tab2, tab3, tab4 = st.tabs(["📂 1단계: 업로드", "🔍 2단계: 정제", "📊 3단계: 분석", "🎯 4단계: 배정"])
@@ -159,22 +160,31 @@ with tab2:
 
 with tab3:
     if not st.session_state.df_master.empty:
-        df = st.session_state.df_master.copy()
+        df_all = st.session_state.df_master.copy()
+        df_all['월'] = df_all['날짜'].dt.month
+        
+        # 분석할 월 선택
+        selected_m = st.selectbox("분석할 월을 선택하세요", sorted(df_all['월'].unique()), format_func=lambda x: f"{x}월")
+        df = df_all[df_all['월'] == selected_m].copy()
+        
+        all_nurses = sorted(df_all['성함'].unique())
+        all_days = range(1, 32)
+        
         s1, s2, s3 = st.tabs(["1. 간호사별 병동 지원 일수", "2. 월별 배정병동", "3. 월별 실제 근무표"])
         
         with s1:
-            st.subheader("간호사별 병동 지원 일수")
+            st.subheader(f"{selected_m}월 간호사별 병동 지원 일수")
             matrix = df.groupby(['성함', '계획병동']).size().unstack(fill_value=0)
             st.dataframe(matrix, use_container_width=True)
             
         with s2:
-            st.subheader("월별 배정병동 (날짜별)")
-            pivot_plan = df.pivot_table(index='성함', columns=df['날짜'].dt.day, values='계획병동', aggfunc='first')
+            st.subheader(f"{selected_m}월 월별 배정병동")
+            pivot_plan = df.pivot_table(index='성함', columns=df['날짜'].dt.day, values='계획병동', aggfunc='first').reindex(index=all_nurses, columns=all_days)
             st.dataframe(pivot_plan, use_container_width=True)
             
         with s3:
-            st.subheader("월별 실제 근무표 (날짜별)")
-            pivot_actual = df.pivot_table(index='성함', columns=df['날짜'].dt.day, values='실제병동', aggfunc='first')
+            st.subheader(f"{selected_m}월 월별 실제 근무표")
+            pivot_actual = df.pivot_table(index='성함', columns=df['날짜'].dt.day, values='실제병동', aggfunc='first').reindex(index=all_nurses, columns=all_days)
             st.dataframe(pivot_actual, use_container_width=True)
             
     else: st.info("2단계를 먼저 실행하세요.")
