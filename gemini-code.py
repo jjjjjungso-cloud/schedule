@@ -3,7 +3,7 @@ import pandas as pd
 import re
 from datetime import datetime, timedelta
 
-# --- [설정 데이터] 팀장님이 관리하는 구역 ---
+# --- [설정 데이터] ---
 WARD_GROUPS = {
     '1동': ['41', '51', '52', '61', '62', '71', '72', '91', '92', '101', '102', '111', '122', '131'],
     '2동': ['66', '75', '76', '85', '86', '96', '105', '106', '116']
@@ -20,7 +20,7 @@ WARD_TO_BLD = {ward: bld for bld, wards in WARD_GROUPS.items() for ward in wards
 # --- [유틸리티 함수] ---
 
 def expand_generic_data(df):
-    """시작일~종료일 범위를 평일 단위 행으로 분리 및 주차 부여"""
+    """시작일~종료일 범위를 평일 단위 행으로 분리"""
     expanded_list = []
     required = ['시작일', '종료일', '근무조', '배정병동']
     if not all(any(req in c for c in df.columns) for req in required): return pd.DataFrame()
@@ -29,7 +29,7 @@ def expand_generic_data(df):
     c_end = next(c for c in df.columns if '종료일' in c)
     c_shift = next(c for c in df.columns if '근무조' in c)
     c_ward = next(c for c in df.columns if '병동' in c)
-    c_name = next((c for c in df.columns if '성함' in c), None)
+    c_name = next((c for c in df.columns if '성함' in c or '이름' in c or '명' in c), None)
 
     for _, row in df.iterrows():
         try:
@@ -37,54 +37,58 @@ def expand_generic_data(df):
             end_dt = pd.to_datetime(row[c_end])
             curr = start_dt
             while curr <= end_dt:
-                if curr.weekday() < 5: # 평일만
+                if curr.weekday() < 5: 
                     expanded_list.append({
                         '날짜': curr,
                         '주차': f"{curr.isocalendar().week}주차",
                         '성함': str(row[c_name]).strip() if c_name and pd.notna(row[c_name]) else "",
                         '계획근무조': str(row[c_shift]).strip(),
                         '계획병동': str(row[c_ward]).strip(),
-                        '시작일': start_dt.strftime('%Y-%m-%d'),
-                        '종료일': end_dt.strftime('%Y-%m-%d')
                     })
                 curr += timedelta(days=1)
         except: continue
     return pd.DataFrame(expanded_list)
 
 def clean_actual_data(uploaded_file, year, month_int):
-    """[최종 수정] 슬래시(/) 기준 파싱 - 근무조 무시, 병동 숫자만 추출"""
+    """[최종 수정] '명' 열 기준 & 슬래시(/) 파싱 로직"""
     xl = pd.ExcelFile(uploaded_file)
     actual_list = []
+    
     for sheet_name in xl.sheet_names:
         df = pd.read_excel(uploaded_file, sheet_name=sheet_name)
-        # 이름/날짜 열 탐색
-        name_cols = [i for i, c in enumerate(df.columns) if '명' in str(c) or '성함' in str(c)]
-        if not name_cols: continue
-        name_idx = name_cols[0]
-        day_cols = [i for i, c in enumerate(df.columns) if str(c).isdigit() or '일' in str(c)]
+        
+        # 1. '명' 컬럼을 이름 열로, '일'자가 포함된 컬럼을 날짜 열로 찾음
+        if '명' not in df.columns: continue
+        name_col = '명'
+        day_cols = [c for c in df.columns if re.match(r'\d+일', str(c)) or str(c).strip().isdigit()]
         
         for _, row in df.iterrows():
-            name = str(row.iloc[name_idx]).strip()
-            if name in ['nan', 'None', '', '명']: continue
+            name = str(row[name_col]).strip()
+            if name in ['nan', 'None', '', '명', '성', '월', '성명']: continue
             
-            for d_idx in day_cols:
-                d_match = re.findall(r'\d+', str(df.columns[d_idx]))
+            for d_col in day_cols:
+                # 날짜 추출
+                d_match = re.findall(r'\d+', str(d_col))
                 if not d_match: continue
+                day = int(d_match[0])
                 
-                code = str(row.iloc[d_idx]).strip()
+                val = str(row[d_col]).strip()
+                
                 # 원칙: 슬래시가 없으면 무시
-                if '/' not in code or code == '/': continue
+                if '/' not in val or val == '/': continue
                 
                 try:
                     # 슬래시 뒤의 숫자(병동)만 추출
-                    parts = code.split('/')
-                    ward_nums = re.findall(r'\d+', parts[1])
-                    if ward_nums:
-                        actual_list.append({
-                            '날짜': datetime(year, month_int, int(d_match[0])),
-                            '성함': name,
-                            '실제병동': str(int(ward_nums[0]))
-                        })
+                    parts = val.split('/')
+                    if len(parts) > 1:
+                        ward_part = parts[1]
+                        nums = re.findall(r'\d+', ward_part)
+                        if nums:
+                            actual_list.append({
+                                '날짜': datetime(year, month_int, day),
+                                '성함': name,
+                                '실제병동': str(int(nums[0]))
+                            })
                 except: continue
     return pd.DataFrame(actual_list)
 
@@ -142,7 +146,6 @@ with tab3:
     if not st.session_state.df_master.empty:
         df_all = st.session_state.df_master.copy()
         df_all['월'] = df_all['날짜'].dt.month
-        
         selected_m = st.selectbox("분석할 월 선택", sorted(df_all['월'].unique()), format_func=lambda x: f"{x}월")
         df = df_all[df_all['월'] == selected_m].copy()
         
@@ -150,21 +153,14 @@ with tab3:
         all_days = range(1, 32)
         
         s1, s2, s3 = st.tabs(["1. 간호사별 지원일수", "2. 월별 배정병동", "3. 월별 실제 근무표"])
-        
         with s1:
-            st.subheader(f"{selected_m}월 간호사별 병동 지원 일수")
             st.dataframe(df.groupby(['성함', '계획병동']).size().unstack(fill_value=0), use_container_width=True)
-            
         with s2:
-            st.subheader(f"{selected_m}월 월별 배정병동")
             pivot_plan = df.pivot_table(index='성함', columns=df['날짜'].dt.day, values='계획병동', aggfunc='first').reindex(index=all_nurses, columns=all_days)
             st.dataframe(pivot_plan, use_container_width=True)
-            
         with s3:
-            st.subheader(f"{selected_m}월 월별 실제 근무표")
             pivot_actual = df.pivot_table(index='성함', columns=df['날짜'].dt.day, values='실제병동', aggfunc='first').reindex(index=all_nurses, columns=all_days)
             st.dataframe(pivot_actual, use_container_width=True)
-            
     else: st.info("2단계 정제를 실행하세요.")
 
 with tab4:
