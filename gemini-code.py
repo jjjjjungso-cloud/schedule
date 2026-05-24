@@ -44,19 +44,26 @@ def expand_generic_data(df):
                         '성함': str(row[c_name]).strip() if c_name and pd.notna(row[c_name]) else "",
                         '계획근무조': str(row[c_shift]).strip(),
                         '계획병동': str(row[c_ward]).strip(),
+                        '시작일': start_dt.strftime('%Y-%m-%d'),
+                        '종료일': end_dt.strftime('%Y-%m-%d')
                     })
                 curr += timedelta(days=1)
         except: continue
     return pd.DataFrame(expanded_list)
 
 def get_refined_ward_data(uploaded_file, year, month_int):
-    """[최종 로직] 날짜 중심 스캔으로 데이터 밀림 방지"""
-    df = pd.read_csv(uploaded_file, encoding='utf-8-sig')
+    """[최종 수정] CSV/Excel 모두 읽으며 '명' 열 기준 날짜 스캔으로 데이터 밀림 방지"""
+    if uploaded_file.name.endswith('.csv'):
+        df = pd.read_csv(uploaded_file, encoding='utf-8-sig')
+    else:
+        df = pd.read_excel(uploaded_file)
+        
     name_col = '명' 
     day_cols = [c for c in df.columns if '일' in str(c)]
     
     processed_data = []
     
+    # [날짜 중심 스캔]
     for d_col in day_cols:
         day_match = re.findall(r'\d+', str(d_col))
         if not day_match: continue
@@ -64,11 +71,11 @@ def get_refined_ward_data(uploaded_file, year, month_int):
         
         for _, row in df.iterrows():
             name = str(row[name_col]).strip()
-            if name in ['nan', 'None', '', '명', '성', '월', '성명']: continue
+            if name in ['nan', 'None', '', '명', '성', '월', '성명', '이름']: continue
             
             val = str(row[d_col]).strip()
             
-            # '/' 파싱 로직: 슬래시가 있는 경우에만 처리
+            # '/' 파싱 로직
             if '/' in val:
                 parts = val.split('/')
                 if len(parts) > 1:
@@ -106,7 +113,7 @@ st.title("🏥 프라임 데이터 통합 및 배정 최적화 시스템")
 if 'df_master' not in st.session_state: st.session_state.df_master = pd.DataFrame()
 if 'df_req_next' not in st.session_state: st.session_state.df_req_next = pd.DataFrame()
 
-# 사이드바 설정
+# 사이드바
 st.sidebar.header("🛠️ 데이터 정제 설정")
 selected_year = st.sidebar.selectbox("데이터 생성 연도", [2026, 2027], index=0)
 selected_month = st.sidebar.selectbox("데이터 생성 기준 월", [f"{i}월" for i in range(1, 13)], index=3)
@@ -118,7 +125,7 @@ with tab1:
     st.info("💡 배정을 위해 3가지 파일을 모두 업로드하세요.")
     c1, c2, c3 = st.columns(3)
     file_p = c1.file_uploader("과거 배정표(Plan)", type=["xlsx", "csv"])
-    file_a = c2.file_uploader("과거 실제 근무표(Actual)", type=["csv"])
+    file_a = c2.file_uploader("과거 실제 근무표(Actual)", type=["xlsx", "csv"])
     file_r = c3.file_uploader("차월 지원 요청 파일(Request)", type=["xlsx", "csv"])
 
 with tab2:
@@ -155,7 +162,6 @@ with tab3:
 
 with tab4:
     if not st.session_state.df_master.empty and not st.session_state.df_req_next.empty:
-        # 기존 배정 로직 유지
         df_master = st.session_state.df_master
         df_req = st.session_state.df_req_next
         st.header("🎯 차월 배정 의사결정")
