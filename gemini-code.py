@@ -1,25 +1,25 @@
+Python
 import streamlit as st
 import pandas as pd
 import re
 from datetime import datetime, timedelta
 
-# --- [설정 데이터] 팀장님이 관리하는 구역 ---
+# --- [설정 데이터] ---
 WARD_GROUPS = {
     '1동': ['41', '51', '52', '61', '62', '71', '72', '91', '92', '101', '102', '111', '122', '131'],
     '2동': ['66', '75', '76', '85', '86', '96', '105', '106', '116']
 }
-
 NURSE_GROUPS = {
     '1동': ['정윤정', '기아현', '김유진', '정하라', '김한솔', '최휘영', '박소영'],
     '2동': ['박가영', '홍현의', '김민정', '정소영', '문선희', '엄현지']
 }
-
 NURSE_TO_BLD = {name: bld for bld, names in NURSE_GROUPS.items() for name in names}
 WARD_TO_BLD = {ward: bld for bld, wards in WARD_GROUPS.items() for ward in wards}
 
 # --- [유틸리티 함수] ---
 
 def expand_generic_data(df):
+    """시작일~종료일 범위를 평일 단위 행으로 분리 및 주차 부여"""
     expanded_list = []
     required = ['시작일', '종료일', '근무조', '배정병동']
     if not all(any(req in c for c in df.columns) for req in required): return pd.DataFrame()
@@ -30,8 +30,7 @@ def expand_generic_data(df):
 
     for _, row in df.iterrows():
         try:
-            start_dt = pd.to_datetime(row[c_start])
-            end_dt = pd.to_datetime(row[c_end])
+            start_dt, end_dt = pd.to_datetime(row[c_start]), pd.to_datetime(row[c_end])
             curr = start_dt
             while curr <= end_dt:
                 if curr.weekday() < 5: 
@@ -41,15 +40,13 @@ def expand_generic_data(df):
                         '성함': str(row[c_name]).strip() if c_name and pd.notna(row[c_name]) else "",
                         '계획근무조': str(row[c_shift]).strip(),
                         '계획병동': str(row[c_ward]).strip(),
-                        '시작일': start_dt.strftime('%Y-%m-%d'),
-                        '종료일': end_dt.strftime('%Y-%m-%d')
                     })
                 curr += timedelta(days=1)
         except: continue
     return pd.DataFrame(expanded_list)
 
 def clean_actual_data(uploaded_file, year, month_int):
-    """[핵심 수정] 팀장님 규칙 적용: 슬래시(/) 파싱 엔진"""
+    """[핵심] 슬래시(/) 파싱 로직 (근무조는 내부 처리용, 결과엔 병동만 저장)"""
     xl = pd.ExcelFile(uploaded_file)
     actual_list = []
     for sheet_name in xl.sheet_names:
@@ -66,42 +63,26 @@ def clean_actual_data(uploaded_file, year, month_int):
             for d_idx in day_cols:
                 d_match = re.findall(r'\d+', str(df.columns[d_idx]))
                 if not d_match: continue
-                
                 code = str(row.iloc[d_idx]).strip().upper()
                 
-                # 1. 셀 내용 빈칸 or '/' 하나면 패스 (continue)
-                if code in ['NAN', 'NONE', '', '/']:
-                    continue
+                # 1. '/' 없거나 빈칸이면 무시
+                if '/' not in code or code == '/': continue
                 
-                # 2. '/'가 반드시 있어야 함 (없으면 병가 등 무시)
-                if '/' not in code:
-                    continue
-                    
-                # 3. 슬래시 앞(근무조) / 뒤(병동 숫자) 분리
+                # 2. 슬래시 앞(근무조) / 뒤(병동 숫자) 파싱
                 parts = code.split('/', 1)
-                front_part = parts[0]
                 back_part = parts[1]
                 
-                # 근무조 확정 (E가 있으면 E, 없으면 D)
-                shift = 'E' if 'E' in front_part else 'D'
-                
-                # 병동 숫자 확정
+                # 3. 병동 숫자만 추출
                 ward_nums = re.findall(r'\d+', back_part)
-                if not ward_nums:
-                    continue
-                actual_ward = ward_nums[0]
+                if not ward_nums: continue
                 
-                try:
-                    actual_list.append({
-                        '날짜': datetime(year, month_int, int(d_match[0])),
-                        '성함': name,
-                        '실제근무조': shift,
-                        '실제병동': str(int(actual_ward))
-                    })
-                except: continue
+                actual_list.append({
+                    '날짜': datetime(year, month_int, int(d_match[0])),
+                    '성함': name,
+                    '실제병동': ward_nums[0] # 병동만 저장
+                })
     return pd.DataFrame(actual_list)
 
-# --- (나머지 로직 동일) ---
 def recommend_shift_logic(history_list):
     if not history_list: return "D"
     last_shift = history_list[-1]
@@ -121,12 +102,12 @@ def get_recent_history_list(df, nurse_name, target_date):
 
 # --- 메인 UI ---
 st.set_page_config(page_title="프라임 배정 최적화 시스템", layout="wide")
-st.title("🏥 프라임 데이터 통합 및 배정 최적화 시스템")
+st.title("🏥 프라임 데이터 통합 및 배정 분석 시스템")
 
 if 'df_master' not in st.session_state: st.session_state.df_master = pd.DataFrame()
 if 'df_req_next' not in st.session_state: st.session_state.df_req_next = pd.DataFrame()
 
-# 사이드바 설정 (데이터 정제용)
+# 사이드바 설정
 st.sidebar.header("🛠️ 데이터 정제 설정")
 selected_year = st.sidebar.selectbox("데이터 생성 연도", [2026, 2027], index=0)
 selected_month = st.sidebar.selectbox("데이터 생성 기준 월", [f"{i}월" for i in range(1, 13)], index=3)
@@ -149,13 +130,14 @@ with tab2:
             df_a = clean_actual_data(file_a, selected_year, month_int)
             st.session_state.df_master = pd.merge(df_p, df_a, on=['날짜', '성함'], how='left')
             st.session_state.df_req_next = expand_generic_data(load_df(file_r))
-            st.success("✅ 정제 완료!")
+            st.success("✅ 정제 완료! 3, 4단계로 이동하세요.")
     else: st.warning("파일을 모두 업로드해 주세요.")
 
 with tab3:
     if not st.session_state.df_master.empty:
         df_all = st.session_state.df_master.copy()
         df_all['월'] = df_all['날짜'].dt.month
+        
         selected_m = st.selectbox("분석할 월 선택", sorted(df_all['월'].unique()), format_func=lambda x: f"{x}월")
         df = df_all[df_all['월'] == selected_m].copy()
         
@@ -163,15 +145,23 @@ with tab3:
         all_days = range(1, 32)
         
         s1, s2, s3 = st.tabs(["1. 간호사별 지원일수", "2. 월별 배정병동", "3. 월별 실제 근무표"])
+        
         with s1:
-            st.subheader("간호사별 누적 병동 지원 횟수")
+            st.subheader(f"{selected_m}월 간호사별 병동 지원 일수")
             st.dataframe(df.groupby(['성함', '계획병동']).size().unstack(fill_value=0), use_container_width=True)
+            
         with s2:
-            st.subheader("월별 배정병동")
-            st.dataframe(df.pivot_table(index='성함', columns=df['날짜'].dt.day, values='계획병동', aggfunc='first').reindex(index=all_nurses, columns=all_days), use_container_width=True)
+            st.subheader(f"{selected_m}월 월별 배정병동")
+            # 병동만 피벗
+            pivot_plan = df.pivot_table(index='성함', columns=df['날짜'].dt.day, values='계획병동', aggfunc='first').reindex(index=all_nurses, columns=all_days)
+            st.dataframe(pivot_plan, use_container_width=True)
+            
         with s3:
-            st.subheader("월별 실제 근무표")
-            st.dataframe(df.pivot_table(index='성함', columns=df['날짜'].dt.day, values='실제병동', aggfunc='first').reindex(index=all_nurses, columns=all_days), use_container_width=True)
+            st.subheader(f"{selected_m}월 월별 실제 근무표")
+            # 실제병동만 피벗
+            pivot_actual = df.pivot_table(index='성함', columns=df['날짜'].dt.day, values='실제병동', aggfunc='first').reindex(index=all_nurses, columns=all_days)
+            st.dataframe(pivot_actual, use_container_width=True)
+            
     else: st.info("2단계 정제를 실행하세요.")
 
 with tab4:
