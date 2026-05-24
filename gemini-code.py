@@ -20,7 +20,7 @@ WARD_TO_BLD = {ward: bld for bld, wards in WARD_GROUPS.items() for ward in wards
 # --- [유틸리티 함수] ---
 
 def expand_generic_data(df):
-    """시작일~종료일 범위를 평일 단위 행으로 분리 및 주차 부여"""
+    """시작일~종료일 범위를 평일 단위 행으로 분리 및 주차 부여 (계획/지원요청 공통)"""
     expanded_list = []
     required = ['시작일', '종료일', '근무조', '배정병동']
     
@@ -39,11 +39,11 @@ def expand_generic_data(df):
             end_dt = pd.to_datetime(row[c_end])
             curr = start_dt
             while curr <= end_dt:
-                if curr.weekday() < 5:
+                if curr.weekday() < 5: # 평일만
                     expanded_list.append({
                         '날짜': curr,
                         '주차': f"{curr.isocalendar().week}주차",
-                        '성함': str(row[c_name]).strip(),
+                        '성함': str(row[c_name]).strip() if c_name and pd.notna(row[c_name]) else "",
                         '계획근무조': str(row[c_shift]).strip(),
                         '계획병동': str(row[c_ward]).strip(),
                         '시작일': start_dt.strftime('%Y-%m-%d'),
@@ -83,7 +83,7 @@ def clean_actual_data(uploaded_file, year, month_int):
     return pd.DataFrame(actual_list)
 
 def recommend_shift_logic(history_list):
-    """2주 블록 로직"""
+    """2주 블록 로직: 마지막 근무조가 1주면 유지, 2주면 교대 (EEDDE -> E)"""
     if not history_list: return "D"
     last_shift = history_list[-1]
     count = 0
@@ -103,24 +103,29 @@ def get_recent_history_list(df, nurse_name, target_date):
 
 # --- 메인 UI 설정 ---
 st.set_page_config(page_title="프라임 배정 최적화 시스템", layout="wide")
-st.markdown("<h1 style='text-align: center; color: #1E3A8A;'>🏥 프라임 데이터 통합 및 배정 최적화 시스템</h1>", unsafe_allow_html=True)
+st.title("🏥 프라임 데이터 통합 및 배정 최적화 시스템")
 
+# 세션 스테이트 초기화
 if 'df_master' not in st.session_state: st.session_state.df_master = pd.DataFrame()
 if 'df_req_next' not in st.session_state: st.session_state.df_req_next = pd.DataFrame()
 
 # 사이드바 설정
-st.sidebar.header("📅 분석 기준 월 설정")
+st.sidebar.header("📅 기준 설정")
 selected_year = st.sidebar.selectbox("연도", [2026, 2027], index=0)
-selected_month = st.sidebar.selectbox("과거 데이터 분석 월", [f"{i}월" for i in range(1, 13)], index=4) # 기본 5월
+selected_month = st.sidebar.selectbox("과거 실제근무 기준 월", [f"{i}월" for i in range(1, 13)], index=4) # 5월로 세팅
 month_int = int(re.findall(r'\d+', selected_month)[0])
 
+# 탭 설정 (5단계 포함)
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📂 1단계: 업로드", "🔍 2단계: 정제", "📊 3단계: 분석", "🎯 4단계: 배정", "📋 5단계: 결원대체 이력 보고서"
+    "📂 1단계: 업로드", 
+    "🔍 2단계: 정제", 
+    "📊 3단계: 분석", 
+    "🎯 4단계: 배정", 
+    "📋 5단계: 결원대체 확인"
 ])
 
-# --- 1단계 & 2단계 ---
 with tab1:
-    st.info(f"💡 {selected_month} 및 차월 분석을 위해 파일을 업로드하세요.")
+    st.info("💡 배정 분석을 위해 3가지 파일을 모두 업로드하세요.")
     c1, c2, c3 = st.columns(3)
     file_p = c1.file_uploader("과거 배정표(Plan)", type=["xlsx", "csv"])
     file_a = c2.file_uploader("과거 실제 근무표(Actual)", type=["xlsx", "csv"])
@@ -133,141 +138,162 @@ with tab2:
             df_p = expand_generic_data(load_df(file_p))
             df_a = clean_actual_data(file_a, selected_year, month_int)
             
+            # [안전장치] 날짜와 성함을 문자열 키로 완벽 동기화하여 매칭 에러 방지
             if not df_p.empty and not df_a.empty:
                 df_p['날짜_key'] = pd.to_datetime(df_p['날짜']).dt.strftime('%Y-%m-%d')
                 df_a['날짜_key'] = pd.to_datetime(df_a['날짜']).dt.strftime('%Y-%m-%d')
                 df_p['성함_key'] = df_p['성함'].astype(str).str.strip()
                 df_a['성함_key'] = df_a['성함'].astype(str).str.strip()
                 
-                df_p['계획병동_숫자'] = df_p['계획병동'].astype(str).str.extract(r'(\d+)')[0]
-                df_a['실제병동_숫자'] = df_a['실제병동'].astype(str).str.extract(r'(\d+)')[0]
-                
                 df_master = pd.merge(df_p, df_a.drop(columns=['날짜', '성함'], errors='ignore'), on=['날짜_key', '성함_key'], how='left')
                 df_master['날짜'] = df_master['날짜_key']
                 
                 st.session_state.df_master = df_master
                 st.session_state.df_req_next = expand_generic_data(load_df(file_r))
-                st.success("✅ 상호 동기화 정제가 완료되었습니다! 5단계 탭에서 리포트를 확인하세요.")
+                st.success("✅ 정제 완료! 3, 4, 5단계로 자유롭게 이동하세요.")
+            else:
+                st.error("⚠️ 데이터 추출 실패: 파일 양식을 확인해 주세요.")
     else: st.warning("파일을 모두 업로드해 주세요.")
 
 with tab3:
     if not st.session_state.df_master.empty:
+        st.subheader("🕵️‍♀️ 간호사별 병동 지원 일수 (경험 매트릭스)")
         exp_matrix = st.session_state.df_master.groupby(['성함', '계획병동']).size().unstack(fill_value=0)
         st.dataframe(exp_matrix, use_container_width=True)
+    else: st.info("2단계를 먼저 실행하세요.")
 
 with tab4:
     if not st.session_state.df_master.empty and not st.session_state.df_req_next.empty:
+        df_master = st.session_state.df_master
         df_req = st.session_state.df_req_next
+        
+        st.header("🎯 차월 배정 의사결정")
+
         weeks = sorted(df_req['주차'].unique())
         selected_week = st.selectbox("배정 주차 선택", weeks)
         week_info = df_req[df_req['주차'] == selected_week]
-        selected_nurse = st.selectbox("간호사를 선택하세요", sorted(list(NURSE_TO_BLD.keys())))
-        final_shift = st.radio("배정할 근무조 선택", ["D", "E"], horizontal=True)
-        st.success("배정 추천 엔진 정상 작동 중")
+        date_range = f"{week_info['날짜'].min().strftime('%Y-%m-%d') if hasattr(week_info['날짜'].min(), 'strftime') else week_info['날짜'].min()} ~ {week_info['날짜'].max().strftime('%Y-%m-%d') if hasattr(week_info['날짜'].max(), 'strftime') else week_info['날짜'].max()}"
+        st.subheader(f"📅 {selected_week} ({date_range})")
+
+        all_nurses = sorted(list(NURSE_TO_BLD.keys()))
+        selected_nurse = st.selectbox("간호사를 선택하세요", all_nurses)
+        
+        st.divider()
+        col_logic, col_select = st.columns(2)
+        with col_logic:
+            st.subheader("⚙️ 근무조 패턴 분석")
+            hist_list = get_recent_history_list(df_master, selected_nurse, week_info['날짜'].min())
+            rec_shift = recommend_shift_logic(hist_list)
+            st.write(f"📌 **{selected_nurse}** 직전 이력: `{ ' -> '.join(hist_list) if hist_list else '데이터 없음' }`")
+            st.info(f"💡 **패턴 분석 결과:** 차주 추천 근무는 **{rec_shift}**입니다.")
+        
+        with col_select:
+            st.subheader("⌨️ 근무조 최종 선택")
+            final_shift = st.radio("배정할 근무조 선택", ["D", "E"], index=0 if rec_shift == "D" else 1, horizontal=True)
+
+        st.divider()
+        st.subheader(f"🏥 {selected_nurse} 간호사 최적 병동 추천")
+        allow_switch = st.checkbox("🚩 타 동(Building) 스위치 허용")
+        
+        avail_today = df_req[(df_req['주차'] == selected_week) & (df_req['계획근무조'] == final_shift)]
+        
+        if not avail_today.empty:
+            my_bld = NURSE_TO_BLD.get(selected_nurse, "1동")
+            ward_counts = df_master[df_master['성함'] == selected_nurse].groupby('계획병동').size().to_dict()
+            
+            recommend_list = []
+            for w in avail_today['계획병동'].unique():
+                if not allow_switch and WARD_TO_BLD.get(w) != my_bld: continue
+                count = ward_counts.get(w, 0)
+                recommend_list.append({"병동": w, "소속": WARD_TO_BLD.get(w, "기타"), "누적 방문일수": count})
+            
+            if recommend_list:
+                res_df = pd.DataFrame(recommend_list).sort_values(by="누적 방문일수")
+                st.dataframe(res_df, use_container_width=True)
+                top = res_df.iloc[0]
+                st.success(f"🏆 최종 추천: **{top['병동']}병동** (누적 방문 {top['누적 방문일수']}회로 가장 적음)")
+            else: st.warning(f"{my_bld} 내 지원 요청이 없습니다. 스위치를 허용해 보세요.")
+        else: st.error(f"해당 주차에 {final_shift} 근무조 요청이 없습니다.")
+    else: st.info("1, 2단계를 먼저 완료해 주세요.")
 
 
-# --- 📋 [완벽 디자인 패치] 5단계: 이미지 매칭 리포트 뷰 탭 ---
+# --- ✨ [백미] 5단계: 결원대체 자체 데이터 자동 추출 탭 ---
 with tab5:
     if not st.session_state.df_master.empty:
+        # 통합된 원본 데이터 가져오기
         df_m = st.session_state.df_master.copy()
         
-        st.markdown(f"<h3 style='color: #1E3A8A;'>⚖️ {selected_month} 결원대체 출동 현황 분석</h3>", unsafe_allow_html=True)
-        st.caption("과거 배정 계획과 실제 투입 기록을 대조하여 발생한 결원대체 근무를 시각화 보고서 형태로 표출합니다.")
-        st.write("")
-        
-        # 날짜 기반 월 필터링
-        df_m['날짜_dt'] = pd.to_datetime(df_m['날짜'])
-        df_month = df_m[df_m['날짜_dt'].dt.month == month_int]
-        
-        # 결원대체 조건 필터링 (계획 != 실제)
-        df_sub = df_month[
-            (df_month['계획병동_숫자'] != df_month['실제병동_숫자']) & 
-            (df_month['실제병동_숫자'].notna())
+        st.header("📋 5단계: 결원대체(비상 투입) 이력 확인")
+        st.info("💡 통합된 마스터 데이터 내부에서 '계획병동'과 '실제병동'이 달라진 비상 투입 내역만 자동으로 발라내어 분석합니다.")
+
+        # [핵심 정제] 숫자만 추출하여 완벽하게 비교 (예: '51병동', '51.0' -> '51'로 통일)
+        df_m['계획_비교용'] = df_m['계획병동'].astype(str).str.extract(r'(\d+)')[0].fillna('')
+        df_m['실제_비교용'] = df_m['실제병동'].astype(str).str.extract(r'(\d+)')[0].fillna('')
+
+        # 결원대체 조건: 실제 근무 기록이 존재하고, 계획과 실제 병동 숫자가 다른 경우
+        df_sub = df_m[
+            (df_m['실제_비교용'] != '') & 
+            (df_m['계획_비교용'] != df_m['실제_비교용'])
         ].copy()
-        
+
         if not df_sub.empty:
-            # 1. 상단 카드형 요약 지표 (Metrics)
-            c1, c2, c3 = st.columns(3)
+            # --- 1. 상단 요약 (간호사별 실제 투입 횟수 매트릭스) ---
+            st.subheader("📊 간호사별 실제 투입(결원대체) 매트릭스")
+            st.caption("특정 간호사에게만 비상 출동이 쏠리지 않았는지 피로도와 형평성을 확인하세요.")
             
-            total_cases = len(df_sub)
-            top_nurse = df_sub['성함'].value_counts().idxmax()
-            top_nurse_cnt = df_sub['성함'].value_counts().max()
-            active_wards = df_sub['실제병동'].nunique()
+            # 간호사(행) vs 실제병동(열) 매트릭스 생성
+            pivot_df = df_sub.groupby(['성함', '실제_비교용']).size().unstack(fill_value=0)
             
-            with c1:
-                st.markdown(f"<div style='padding: 15px; border-radius: 10px; background-color: #F3F4F6; text-align: center; border-left: 5px solid #3B82F6;'><p style='margin:0; font-size:14px; color:#6B7280;'>월간 총 결원대체</p><h2 style='margin:5px 0; color:#1F2937;'>{total_cases}건</h2></div>", unsafe_allow_html=True)
-            with c2:
-                st.markdown(f"<div style='padding: 15px; border-radius: 10px; background-color: #F3F4F6; text-align: center; border-left: 5px solid #EF4444;'><p style='margin:0; font-size:14px; color:#6B7280;'>⚠️ 최다 출동 간호사</p><h2 style='margin:5px 0; color:#1F2937;'>{top_nurse} ({top_nurse_cnt}회)</h2></div>", unsafe_allow_html=True)
-            with c3:
-                st.markdown(f"<div style='padding: 15px; border-radius: 10px; background-color: #F3F4F6; text-align: center; border-left: 5px solid #10B981;'><p style='margin:0; font-size:14px; color:#6B7280;'>🏥 지원 투입 병동 수</p><h2 style='margin:5px 0; color:#1F2937;'>{active_wards}개 병동</h2></div>", unsafe_allow_html=True)
+            # 보기 좋게 병동명 뒤에 '병동' 붙이기
+            pivot_df.columns = [f"{col}병동" for col in pivot_df.columns]
             
-            st.write("")
+            pivot_df['총 출동횟수(피로도)'] = pivot_df.sum(axis=1)
+            pivot_df = pivot_df.sort_values('총 출동횟수(피로도)', ascending=False)
+            
+            # 출동 횟수가 많을수록 붉은색 그라데이션
+            st.dataframe(
+                pivot_df.style.background_gradient(cmap='Reds', subset=['총 출동횟수(피로도)']), 
+                use_container_width=True
+            )
+            
             st.divider()
+
+            # --- 2. 직관적인 상세 이력 리스트 ---
+            st.subheader("📅 일자별 결원대체 상세 이력 리스트")
             
-            # 2. 이미지 스타일의 일자별 리포트 카드 리스트 표출 존
-            st.markdown("### 📅 결원대체 상세 이력 리포트")
+            # 표출할 컬럼 정리 및 요구사항에 맞춘 이름 변경
+            res_df = df_sub[['날짜', '성함', '계획병동', '실제병동', '실제근무조']].copy()
             
-            # 최신 날짜 순으로 정렬
-            df_log = df_sub.sort_values(by='날짜', ascending=False)
+            # '병동' 글자가 없으면 붙여주기
+            res_df['계획병동'] = res_df['계획병동'].apply(lambda x: str(x) if '병동' in str(x) else f"{x}병동")
+            res_df['실제병동'] = res_df['실제병동'].apply(lambda x: str(x) if '병동' in str(x) else f"{x}병동")
             
-            # 간호사 필터 기능
-            search_nurse = st.multiselect("👤 특정 간호사만 필터링", options=sorted(df_log['성함'].unique()))
+            res_df = res_df.rename(columns={
+                '계획병동': '원래계획', 
+                '실제병동': '실제 근무', 
+                '실제근무조': '근무조'
+            })
+            
+            # 날짜 포맷 깔끔하게 변경
+            res_df['날짜'] = pd.to_datetime(res_df['날짜']).dt.strftime('%Y-%m-%d')
+            
+            # 검색 필터 추가
+            search_nurse = st.multiselect("특정 간호사 이력 필터링", options=sorted(res_df['성함'].unique()))
             if search_nurse:
-                df_log = df_log[df_log['성함'].isin(search_nurse)]
-                
-            st.write("")
+                res_df = res_df[res_df['성함'].isin(search_nurse)]
             
-            # 루프를 돌며 이미지에 나온 일지 스타일의 박스 레이아웃을 생성
-            for _, row in df_log.iterrows():
-                date_str = row['날짜']
-                name = row['성함']
-                plan_ward = f"{row['계획병동']}병동" if '병동' not in str(row['계획병동']) else row['계획병동']
-                actual_ward = f"{row['실제병동']}병동" if '병동' not in str(row['실제병동']) else row['실제병동']
-                shift = row['실제근무조']
-                
-                # 소속 동(Building) 태그 매핑
-                bld_tag = NURSE_TO_BLD.get(name, "1동")
-                bld_color = "#1E40AF" if bld_tag == "1동" else "#065F46"
-                
-                # HTML과 CSS를 활용한 개별 리포트 박스 렌더링
-                card_html = f"""
-                <div style="
-                    background-color: #FFFFFF; 
-                    padding: 20px; 
-                    border-radius: 12px; 
-                    margin-bottom: 15px; 
-                    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-                    border: 1px solid #E5E7EB;
-                ">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                        <span style="font-size: 15px; font-weight: 600; color: #4B5563; background-color: #F3F4F6; padding: 4px 10px; border-radius: 6px;">📅 {date_str}</span>
-                        <span style="font-size: 12px; font-weight: bold; color: #FFFFFF; background-color: {bld_color}; padding: 3px 8px; border-radius: 20px;">{bld_tag} 소속</span>
-                    </div>
-                    <div style="display: flex; align-items: baseline; gap: 15px; margin-top: 10px;">
-                        <h3 style="margin: 0; color: #111827; font-size: 20px; font-weight: 700;">{name} 간호사</h3>
-                        <p style="margin: 0; font-size: 16px; color: #1F2937; font-weight: 500;">
-                            <span style="color: #6B7280; font-weight: normal;">원래계획:</span> <strong style="color: #4B5563;">{plan_ward}</strong> 
-                            <span style="color: #3B82F6; font-weight: bold; margin: 0 8px;">➡️</span> 
-                            <span style="color: #6B7280; font-weight: normal;">실제근무:</span> <strong style="color: #EF4444; font-size: 18px;">{actual_ward}</strong>
-                            <span style="margin-left: 15px; background-color: #FEF3C7; color: #92400E; padding: 2px 8px; border-radius: 4px; font-size: 14px; font-weight: bold;">근무조: {shift}</span>
-                        </p>
-                    </div>
-                </div>
-                """
-                st.markdown(card_html, unsafe_allow_html=True)
-                
-            # 다운로드 기능 유지
-            st.write("")
-            csv_cols = ['날짜', '성함', '계획병동', '실제병동', '실제근무조']
-            df_download = df_log[csv_cols].rename(columns={'계획병동': '원래계획', '실제병동': '실제 근무', '실제근무조': '근무조'})
-            csv_data = df_download.to_csv(index=False).encode('utf-8-sig')
+            # 최신 날짜순 정렬 후 표출
+            st.dataframe(res_df.sort_values('날짜', ascending=False), use_container_width=True, hide_index=True)
+            
+            # CSV 다운로드
+            csv_data = res_df.sort_values('날짜', ascending=False).to_csv(index=False).encode('utf-8-sig')
             st.download_button(
-                label=f"📥 {selected_month} 결원대체 명단 양식 다운로드 (CSV)",
+                label=f"📥 {selected_month} 결원대체 이력 보고서 다운로드",
                 data=csv_data,
-                file_name=f"결원대체_이력보고서_{selected_month}.csv",
+                file_name=f"결원대체_자동추출_보고서_{selected_year}년_{selected_month}.csv",
                 mime="text/csv"
             )
         else:
-            st.success(f"🎉 {selected_month} 대조 결과: 계획표와 실제 근무 기록이 일치하여 결원대체(비상 출동) 내역이 존재하지 않습니다.")
+            st.success(f"🎉 분석 결과: {selected_month}에는 계획과 실제 근무가 100% 일치하여 결원대체 건이 없습니다.")
     else:
-        st.info("📂 1, 2단계를 통해 과거 배정표(Plan)와 실제 근무표(Actual)를 먼저 통합 정제해 주세요.")
+        st.warning("📂 1, 2단계를 통해 과거 데이터를 먼저 정제 및 통합해 주세요.")
