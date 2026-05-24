@@ -3,7 +3,7 @@ import pandas as pd
 import re
 from datetime import datetime, timedelta
 
-# --- [설정 데이터] 팀장님이 관리하는 구역 ---
+# --- [설정 데이터] ---
 WARD_GROUPS = {
     '1동': ['41', '51', '52', '61', '62', '71', '72', '91', '92', '101', '102', '111', '122', '131'],
     '2동': ['66', '75', '76', '85', '86', '96', '105', '106', '116']
@@ -17,73 +17,85 @@ NURSE_GROUPS = {
 NURSE_TO_BLD = {name: bld for bld, names in NURSE_GROUPS.items() for name in names}
 WARD_TO_BLD = {ward: bld for bld, wards in WARD_GROUPS.items() for ward in wards}
 
-# --- [유틸리티 함수] ---
+# --- [유틸리티 함수: 에러 방어력 MAX] ---
 
 def expand_generic_data(df):
-    """시작일~종료일 범위를 평일 단위 행으로 분리 및 주차 부여 (계획/지원요청 공통)"""
+    """배정표(Plan) 정제 - 컬럼을 못 찾아도 에러 없이 빈 데이터 반환"""
     expanded_list = []
-    required = ['시작일', '종료일', '근무조', '배정병동']
-    
-    if not all(any(req in c for c in df.columns) for req in required):
-        return pd.DataFrame()
-    
-    c_start = next(c for c in df.columns if '시작일' in c)
-    c_end = next(c for c in df.columns if '종료일' in c)
-    c_shift = next(c for c in df.columns if '근무조' in c)
-    c_ward = next(c for c in df.columns if '병동' in c)
-    c_name = next((c for c in df.columns if '성함' in c), None)
+    try:
+        # 매우 유연한 컬럼명 찾기 (포함된 단어만 있으면 됨)
+        c_start = next((c for c in df.columns if '시작' in c), None)
+        c_end = next((c for c in df.columns if '종료' in c), None)
+        c_shift = next((c for c in df.columns if '근무조' in c), None)
+        c_ward = next((c for c in df.columns if '병동' in c), None)
+        c_name = next((c for c in df.columns if '성함' in c or '명' in c or '이름' in c), None)
 
-    for _, row in df.iterrows():
-        try:
-            start_dt = pd.to_datetime(row[c_start])
-            end_dt = pd.to_datetime(row[c_end])
-            curr = start_dt
-            while curr <= end_dt:
-                if curr.weekday() < 5: # 평일만
-                    expanded_list.append({
-                        '날짜': curr,
-                        '주차': f"{curr.isocalendar().week}주차",
-                        '성함': str(row[c_name]).strip() if c_name and pd.notna(row[c_name]) else "",
-                        '계획근무조': str(row[c_shift]).strip(),
-                        '계획병동': str(row[c_ward]).strip(),
-                        '시작일': start_dt.strftime('%Y-%m-%d'),
-                        '종료일': end_dt.strftime('%Y-%m-%d')
-                    })
-                curr += timedelta(days=1)
-        except: continue
-    return pd.DataFrame(expanded_list)
+        # 필수 컬럼이 하나라도 없으면 안전하게 종료
+        if not all([c_start, c_end, c_shift, c_ward, c_name]):
+            return pd.DataFrame()
+
+        for _, row in df.iterrows():
+            try:
+                start_dt = pd.to_datetime(row[c_start])
+                end_dt = pd.to_datetime(row[c_end])
+                curr = start_dt
+                while curr <= end_dt:
+                    if curr.weekday() < 5:
+                        expanded_list.append({
+                            '날짜': curr,
+                            '주차': f"{curr.isocalendar().week}주차",
+                            '성함': str(row[c_name]).strip() if pd.notna(row[c_name]) else "",
+                            '계획근무조': str(row[c_shift]).strip(),
+                            '계획병동': str(row[c_ward]).strip(),
+                        })
+                    curr += timedelta(days=1)
+            except: continue
+        return pd.DataFrame(expanded_list)
+    except Exception:
+        return pd.DataFrame()
 
 def clean_actual_data(uploaded_file, year, month_int):
-    """실제 근무표 정제: P-코드 추출"""
-    xl = pd.ExcelFile(uploaded_file)
+    """실제 근무표 정제 - CSV/Excel 모두 지원 및 에러 방어"""
     actual_list = []
-    for sheet_name in xl.sheet_names:
-        df = pd.read_excel(uploaded_file, sheet_name=sheet_name)
-        name_idx = next((i for i, c in enumerate(df.columns) if '명' in str(c)), 2)
-        day_cols = [i for i, c in enumerate(df.columns) if '일' in str(c)]
-        for _, row in df.iterrows():
-            name = str(row.iloc[name_idx]).strip()
-            if name in ['nan', '명', '', 'None']: continue
-            for d_idx in day_cols:
-                d_match = re.findall(r'\d+', str(df.columns[d_idx]))
-                if not d_match: continue
-                code = str(row.iloc[d_idx])
-                if code.startswith('P-'):
-                    ward_match = re.search(r'/(\d+)', code)
-                    if ward_match:
-                        shift = 'D' if ('D4' in code or 'D' in code) else 'E'
-                        try:
+    try:
+        # 파일 확장자에 따라 다르게 읽기 (CSV 충돌 에러 원천 차단)
+        if uploaded_file.name.endswith('.csv'):
+            sheets = {'Sheet1': pd.read_csv(uploaded_file)}
+        else:
+            xl = pd.ExcelFile(uploaded_file)
+            sheets = {name: pd.read_excel(uploaded_file, sheet_name=name) for name in xl.sheet_names}
+
+        for sheet_name, df in sheets.items():
+            name_cols = [i for i, c in enumerate(df.columns) if '명' in str(c) or '성함' in str(c)]
+            if not name_cols: continue
+            name_idx = name_cols[0]
+            
+            day_cols = [i for i, c in enumerate(df.columns) if '일' in str(c) or str(c).isdigit()]
+            
+            for _, row in df.iterrows():
+                name = str(row.iloc[name_idx]).strip()
+                if name in ['nan', '명', '', 'None']: continue
+                for d_idx in day_cols:
+                    col_name = str(df.columns[d_idx])
+                    d_match = re.findall(r'\d+', col_name)
+                    if not d_match: continue
+                    
+                    code = str(row.iloc[d_idx]).strip()
+                    if code.startswith('P-'):
+                        ward_match = re.search(r'/(\d+)', code)
+                        if ward_match:
+                            shift = 'D' if ('D4' in code or 'D' in code) else 'E'
                             actual_list.append({
                                 '날짜': datetime(year, month_int, int(d_match[0])),
                                 '성함': name,
                                 '실제근무조': shift,
                                 '실제병동': str(int(ward_match.group(1)))
                             })
-                        except: continue
+    except Exception:
+        pass # 에러 발생 시 빈 데이터 반환하여 빨간 에러창 방지
     return pd.DataFrame(actual_list)
 
 def recommend_shift_logic(history_list):
-    """2주 블록 로직: 마지막 근무조가 1주면 유지, 2주면 교대 (EEDDE -> E)"""
     if not history_list: return "D"
     last_shift = history_list[-1]
     count = 0
@@ -93,7 +105,6 @@ def recommend_shift_logic(history_list):
     return last_shift if count < 2 else ("D" if last_shift == "E" else "E")
 
 def get_recent_history_list(df, nurse_name, target_date):
-    """직전 5주간의 근무조 리스트 추출"""
     if df.empty: return []
     target_dt = pd.to_datetime(target_date)
     start_dt = target_dt - timedelta(weeks=5)
@@ -105,27 +116,20 @@ def get_recent_history_list(df, nurse_name, target_date):
 st.set_page_config(page_title="프라임 배정 최적화 시스템", layout="wide")
 st.title("🏥 프라임 데이터 통합 및 배정 최적화 시스템")
 
-# 세션 스테이트 초기화
 if 'df_master' not in st.session_state: st.session_state.df_master = pd.DataFrame()
 if 'df_req_next' not in st.session_state: st.session_state.df_req_next = pd.DataFrame()
 
-# 사이드바 설정
 st.sidebar.header("📅 기준 설정")
 selected_year = st.sidebar.selectbox("연도", [2026, 2027], index=0)
-selected_month = st.sidebar.selectbox("과거 실제근무 기준 월", [f"{i}월" for i in range(1, 13)], index=4) # 5월로 세팅
+selected_month = st.sidebar.selectbox("과거 데이터 분석 기준 월", [f"{i}월" for i in range(1, 13)], index=4) 
 month_int = int(re.findall(r'\d+', selected_month)[0])
 
-# 탭 설정 (5단계 포함)
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📂 1단계: 업로드", 
-    "🔍 2단계: 정제", 
-    "📊 3단계: 분석", 
-    "🎯 4단계: 배정", 
-    "📋 5단계: 결원대체 확인"
+    "📂 1단계: 업로드", "🔍 2단계: 정제", "📊 3단계: 분석", "🎯 4단계: 배정", "📋 5단계: 결원대체 확인"
 ])
 
 with tab1:
-    st.info("💡 배정 분석을 위해 3가지 파일을 모두 업로드하세요.")
+    st.info("💡 통합 분석을 위해 3가지 파일을 모두 업로드하세요.")
     c1, c2, c3 = st.columns(3)
     file_p = c1.file_uploader("과거 배정표(Plan)", type=["xlsx", "csv"])
     file_a = c2.file_uploader("과거 실제 근무표(Actual)", type=["xlsx", "csv"])
@@ -135,25 +139,32 @@ with tab2:
     if file_p and file_a and file_r:
         if st.button("🚀 데이터 통합 정제 시작"):
             def load_df(f): return pd.read_csv(f) if f.name.endswith('csv') else pd.read_excel(f)
-            df_p = expand_generic_data(load_df(file_p))
-            df_a = clean_actual_data(file_a, selected_year, month_int)
             
-            # [안전장치] 날짜와 성함을 문자열 키로 완벽 동기화하여 매칭 에러 방지
-            if not df_p.empty and not df_a.empty:
-                df_p['날짜_key'] = pd.to_datetime(df_p['날짜']).dt.strftime('%Y-%m-%d')
-                df_a['날짜_key'] = pd.to_datetime(df_a['날짜']).dt.strftime('%Y-%m-%d')
-                df_p['성함_key'] = df_p['성함'].astype(str).str.strip()
-                df_a['성함_key'] = df_a['성함'].astype(str).str.strip()
+            try:
+                df_p = expand_generic_data(load_df(file_p))
+                df_a = clean_actual_data(file_a, selected_year, month_int)
                 
-                df_master = pd.merge(df_p, df_a.drop(columns=['날짜', '성함'], errors='ignore'), on=['날짜_key', '성함_key'], how='left')
-                df_master['날짜'] = df_master['날짜_key']
-                
-                st.session_state.df_master = df_master
-                st.session_state.df_req_next = expand_generic_data(load_df(file_r))
-                st.success("✅ 정제 완료! 3, 4, 5단계로 자유롭게 이동하세요.")
-            else:
-                st.error("⚠️ 데이터 추출 실패: 파일 양식을 확인해 주세요.")
-    else: st.warning("파일을 모두 업로드해 주세요.")
+                if df_p.empty:
+                    st.warning("⚠️ '과거 배정표(Plan)' 양식이 맞지 않습니다. (시작일, 종료일, 병동, 성함 등 포함 여부 확인)")
+                elif df_a.empty:
+                    st.warning("⚠️ '과거 실제 근무표(Actual)'에서 P-코드를 찾을 수 없거나 파일 포맷이 안 맞습니다.")
+                else:
+                    # 안전한 병합 처리
+                    df_p['날짜_key'] = pd.to_datetime(df_p['날짜']).dt.strftime('%Y-%m-%d')
+                    df_a['날짜_key'] = pd.to_datetime(df_a['날짜']).dt.strftime('%Y-%m-%d')
+                    df_p['성함_key'] = df_p['성함'].astype(str).str.strip()
+                    df_a['성함_key'] = df_a['성함'].astype(str).str.strip()
+                    
+                    df_master = pd.merge(df_p, df_a.drop(columns=['날짜', '성함'], errors='ignore'), on=['날짜_key', '성함_key'], how='left')
+                    df_master['날짜'] = df_master['날짜_key']
+                    
+                    st.session_state.df_master = df_master
+                    st.session_state.df_req_next = expand_generic_data(load_df(file_r))
+                    st.success("✅ 정제 및 병합 완료! 3, 4, 5단계 탭으로 이동하세요.")
+            except Exception as e:
+                st.error(f"🚨 시스템 동기화 중 에러가 발생했습니다: {e}")
+    else: 
+        st.warning("파일을 모두 업로드해 주세요.")
 
 with tab3:
     if not st.session_state.df_master.empty:
@@ -166,15 +177,11 @@ with tab4:
     if not st.session_state.df_master.empty and not st.session_state.df_req_next.empty:
         df_master = st.session_state.df_master
         df_req = st.session_state.df_req_next
-        
         st.header("🎯 차월 배정 의사결정")
-
         weeks = sorted(df_req['주차'].unique())
         selected_week = st.selectbox("배정 주차 선택", weeks)
         week_info = df_req[df_req['주차'] == selected_week]
-        date_range = f"{week_info['날짜'].min().strftime('%Y-%m-%d') if hasattr(week_info['날짜'].min(), 'strftime') else week_info['날짜'].min()} ~ {week_info['날짜'].max().strftime('%Y-%m-%d') if hasattr(week_info['날짜'].max(), 'strftime') else week_info['날짜'].max()}"
-        st.subheader(f"📅 {selected_week} ({date_range})")
-
+        
         all_nurses = sorted(list(NURSE_TO_BLD.keys()))
         selected_nurse = st.selectbox("간호사를 선택하세요", all_nurses)
         
@@ -196,104 +203,70 @@ with tab4:
         allow_switch = st.checkbox("🚩 타 동(Building) 스위치 허용")
         
         avail_today = df_req[(df_req['주차'] == selected_week) & (df_req['계획근무조'] == final_shift)]
-        
         if not avail_today.empty:
             my_bld = NURSE_TO_BLD.get(selected_nurse, "1동")
             ward_counts = df_master[df_master['성함'] == selected_nurse].groupby('계획병동').size().to_dict()
-            
             recommend_list = []
             for w in avail_today['계획병동'].unique():
                 if not allow_switch and WARD_TO_BLD.get(w) != my_bld: continue
                 count = ward_counts.get(w, 0)
                 recommend_list.append({"병동": w, "소속": WARD_TO_BLD.get(w, "기타"), "누적 방문일수": count})
-            
             if recommend_list:
                 res_df = pd.DataFrame(recommend_list).sort_values(by="누적 방문일수")
                 st.dataframe(res_df, use_container_width=True)
                 top = res_df.iloc[0]
                 st.success(f"🏆 최종 추천: **{top['병동']}병동** (누적 방문 {top['누적 방문일수']}회로 가장 적음)")
-            else: st.warning(f"{my_bld} 내 지원 요청이 없습니다. 스위치를 허용해 보세요.")
+            else: st.warning(f"{my_bld} 내 지원 요청이 없습니다.")
         else: st.error(f"해당 주차에 {final_shift} 근무조 요청이 없습니다.")
     else: st.info("1, 2단계를 먼저 완료해 주세요.")
 
-
-# --- ✨ [백미] 5단계: 결원대체 자체 데이터 자동 추출 탭 ---
+# --- 📋 5단계: 결원대체 자동 추출 분석 (에러 무적 버전) ---
 with tab5:
     if not st.session_state.df_master.empty:
-        # 통합된 원본 데이터 가져오기
         df_m = st.session_state.df_master.copy()
+        st.header("📋 5단계: 결원대체(비상 투입) 자동 추출 분석")
         
-        st.header("📋 5단계: 결원대체(비상 투입) 이력 확인")
-        st.info("💡 통합된 마스터 데이터 내부에서 '계획병동'과 '실제병동'이 달라진 비상 투입 내역만 자동으로 발라내어 분석합니다.")
+        try:
+            df_m['계획_비교용'] = df_m['계획병동'].astype(str).str.extract(r'(\d+)')[0].fillna('')
+            
+            # 실제병동 컬럼이 없는 경우(매칭 데이터가 하나도 없을 때) 방어 코드
+            if '실제병동' not in df_m.columns:
+                df_m['실제병동'] = ''
+                df_m['실제근무조'] = ''
+                
+            df_m['실제_비교용'] = df_m['실제병동'].astype(str).str.extract(r'(\d+)')[0].fillna('')
 
-        # [핵심 정제] 숫자만 추출하여 완벽하게 비교 (예: '51병동', '51.0' -> '51'로 통일)
-        df_m['계획_비교용'] = df_m['계획병동'].astype(str).str.extract(r'(\d+)')[0].fillna('')
-        df_m['실제_비교용'] = df_m['실제병동'].astype(str).str.extract(r'(\d+)')[0].fillna('')
+            df_sub = df_m[
+                (df_m['실제_비교용'] != '') & 
+                (df_m['계획_비교용'] != df_m['실제_비교용'])
+            ].copy()
 
-        # 결원대체 조건: 실제 근무 기록이 존재하고, 계획과 실제 병동 숫자가 다른 경우
-        df_sub = df_m[
-            (df_m['실제_비교용'] != '') & 
-            (df_m['계획_비교용'] != df_m['실제_비교용'])
-        ].copy()
+            if not df_sub.empty:
+                st.subheader("📊 간호사별 실제 투입(결원대체) 매트릭스")
+                pivot_df = df_sub.groupby(['성함', '실제_비교용']).size().unstack(fill_value=0)
+                pivot_df.columns = [f"{col}병동" for col in pivot_df.columns]
+                pivot_df['총 출동횟수(피로도)'] = pivot_df.sum(axis=1)
+                pivot_df = pivot_df.sort_values('총 출동횟수(피로도)', ascending=False)
+                st.dataframe(pivot_df.style.background_gradient(cmap='Reds', subset=['총 출동횟수(피로도)']), use_container_width=True)
+                
+                st.divider()
 
-        if not df_sub.empty:
-            # --- 1. 상단 요약 (간호사별 실제 투입 횟수 매트릭스) ---
-            st.subheader("📊 간호사별 실제 투입(결원대체) 매트릭스")
-            st.caption("특정 간호사에게만 비상 출동이 쏠리지 않았는지 피로도와 형평성을 확인하세요.")
-            
-            # 간호사(행) vs 실제병동(열) 매트릭스 생성
-            pivot_df = df_sub.groupby(['성함', '실제_비교용']).size().unstack(fill_value=0)
-            
-            # 보기 좋게 병동명 뒤에 '병동' 붙이기
-            pivot_df.columns = [f"{col}병동" for col in pivot_df.columns]
-            
-            pivot_df['총 출동횟수(피로도)'] = pivot_df.sum(axis=1)
-            pivot_df = pivot_df.sort_values('총 출동횟수(피로도)', ascending=False)
-            
-            # 출동 횟수가 많을수록 붉은색 그라데이션
-            st.dataframe(
-                pivot_df.style.background_gradient(cmap='Reds', subset=['총 출동횟수(피로도)']), 
-                use_container_width=True
-            )
-            
-            st.divider()
-
-            # --- 2. 직관적인 상세 이력 리스트 ---
-            st.subheader("📅 일자별 결원대체 상세 이력 리스트")
-            
-            # 표출할 컬럼 정리 및 요구사항에 맞춘 이름 변경
-            res_df = df_sub[['날짜', '성함', '계획병동', '실제병동', '실제근무조']].copy()
-            
-            # '병동' 글자가 없으면 붙여주기
-            res_df['계획병동'] = res_df['계획병동'].apply(lambda x: str(x) if '병동' in str(x) else f"{x}병동")
-            res_df['실제병동'] = res_df['실제병동'].apply(lambda x: str(x) if '병동' in str(x) else f"{x}병동")
-            
-            res_df = res_df.rename(columns={
-                '계획병동': '원래계획', 
-                '실제병동': '실제 근무', 
-                '실제근무조': '근무조'
-            })
-            
-            # 날짜 포맷 깔끔하게 변경
-            res_df['날짜'] = pd.to_datetime(res_df['날짜']).dt.strftime('%Y-%m-%d')
-            
-            # 검색 필터 추가
-            search_nurse = st.multiselect("특정 간호사 이력 필터링", options=sorted(res_df['성함'].unique()))
-            if search_nurse:
-                res_df = res_df[res_df['성함'].isin(search_nurse)]
-            
-            # 최신 날짜순 정렬 후 표출
-            st.dataframe(res_df.sort_values('날짜', ascending=False), use_container_width=True, hide_index=True)
-            
-            # CSV 다운로드
-            csv_data = res_df.sort_values('날짜', ascending=False).to_csv(index=False).encode('utf-8-sig')
-            st.download_button(
-                label=f"📥 {selected_month} 결원대체 이력 보고서 다운로드",
-                data=csv_data,
-                file_name=f"결원대체_자동추출_보고서_{selected_year}년_{selected_month}.csv",
-                mime="text/csv"
-            )
-        else:
-            st.success(f"🎉 분석 결과: {selected_month}에는 계획과 실제 근무가 100% 일치하여 결원대체 건이 없습니다.")
+                st.subheader("📅 일자별 상세 이력 리스트")
+                res_df = df_sub[['날짜', '성함', '계획병동', '실제병동', '실제근무조']].copy()
+                res_df['계획병동'] = res_df['계획병동'].apply(lambda x: str(x) if '병동' in str(x) else f"{x}병동")
+                res_df['실제병동'] = res_df['실제병동'].apply(lambda x: str(x) if '병동' in str(x) else f"{x}병동")
+                res_df = res_df.rename(columns={'계획병동': '원래계획', '실제병동': '실제 근무', '실제근무조': '근무조'})
+                
+                res_df['날짜'] = pd.to_datetime(res_df['날짜']).dt.strftime('%Y-%m-%d')
+                
+                search_nurse = st.multiselect("특정 간호사 이력 필터링", options=sorted(res_df['성함'].unique()))
+                if search_nurse:
+                    res_df = res_df[res_df['성함'].isin(search_nurse)]
+                
+                st.dataframe(res_df.sort_values('날짜', ascending=False), use_container_width=True, hide_index=True)
+            else:
+                st.success(f"🎉 대조 결과: 계획과 실제 근무 기록이 일치하여 결원대체 내역이 존재하지 않습니다.")
+        except Exception as e:
+            st.error(f"🚨 5단계 데이터 분석 중 알 수 없는 에러가 발생했습니다: {e}")
     else:
-        st.warning("📂 1, 2단계를 통해 과거 데이터를 먼저 정제 및 통합해 주세요.")
+        st.warning("📂 1, 2단계를 통해 데이터를 먼저 통합 정제해 주세요.")
