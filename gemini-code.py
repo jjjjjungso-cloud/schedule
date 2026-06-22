@@ -18,7 +18,7 @@ NURSE_TO_BLD = {name: bld for bld, names in NURSE_GROUPS.items() for name in nam
 WARD_TO_BLD = {ward: bld for bld, wards in WARD_GROUPS.items() for ward in wards}
 ALL_WARDS = [w for wards in WARD_GROUPS.values() for w in wards]
 
-# --- [유틸리티 함수 (EMR 데이터 파싱 시뮬레이션)] ---
+# --- [유틸리티 함수] ---
 @st.cache_data
 def expand_generic_data(df):
     expanded_list = []
@@ -102,7 +102,7 @@ def get_replacement_system_data(df):
             except: continue
     return pd.DataFrame(rep_list).drop_duplicates()
 
-# --- [UI: 사이드바 (EMR DB 연동 시뮬레이션)] ---
+# --- [UI: 사이드바] ---
 st.sidebar.header("🔄 EMR 데이터 동기화")
 st.sidebar.info("정식 전산 반영 전, 엑셀 파일로 EMR DB 연결을 시뮬레이션합니다.")
 
@@ -141,28 +141,23 @@ if st.sidebar.button("🚀 EMR 데이터 동기화 (Sync)"):
     else:
         st.sidebar.warning("모든 데이터를 연동해주세요.")
 
-# --- [메인 화면: 실시간 대시보드] ---
+# --- [메인 화면] ---
 st.title("🏥 프라임 간호실 실시간 통제 센터 (Live Control Tower)")
 
 if 'df_master' in st.session_state and not st.session_state.df_master.empty:
     df_master = st.session_state.df_master
     df_req = st.session_state.df_req
     
-    # 1. 실시간 시뮬레이션을 위한 '오늘 날짜' 선택
     avail_dates = sorted(df_master['날짜'].dt.date.dropna().unique())
     col_date, _, _ = st.columns(3)
-    today_date = col_date.selectbox("📅 현재 시점(Today) 설정 (이 날짜까지의 이력만 실시간 계산됨)", avail_dates, index=len(avail_dates)-1)
+    today_date = col_date.selectbox("📅 현재 시점(Today) 설정", avail_dates, index=len(avail_dates)-1)
     
-    # '오늘' 이전의 데이터만 필터링 (완벽한 실시간 재현)
     df_realtime = df_master[df_master['날짜'].dt.date <= today_date].copy()
     
-    tab1, tab2 = st.tabs(["📊 팀 전체 실시간 누적 스탯", "🚨 긴급 결원 발생 즉시 배정 (추천 알고리즘)"])
+    tab1, tab2 = st.tabs(["📊 팀 전체 실시간 누적 스탯", "🚨 긴급 결원 배정 마스터 랭킹"])
     
     with tab1:
         st.subheader(f"💡 {today_date} 기준 팀 전체 실시간 이력 보드")
-        st.info("실시간 동기화된 EMR 데이터를 바탕으로 각 간호사의 현재 피로도와 경험치를 모니터링합니다.")
-        
-        # 팀 전체 누적 스탯 실시간 계산
         all_nurses = sorted(df_master['성함'].dropna().unique())
         stat_list = []
         for nurse in all_nurses:
@@ -170,7 +165,6 @@ if 'df_master' in st.session_state and not st.session_state.df_master.empty:
             sup_total = n_df[n_df['실제역할'] == '지원'].shape[0]
             rep_total = n_df[n_df['실제역할'].isin(['결원대체', '⚠️긴급변경(결원)'])].shape[0]
             
-            # 많이 간 병동 Top 2 추출 (간단한 프로필용)
             top_wards = n_df['실제병동'].dropna().value_counts().head(2).index.tolist()
             top_wards_str = ", ".join(top_wards) if top_wards else "경험없음"
             
@@ -186,64 +180,86 @@ if 'df_master' in st.session_state and not st.session_state.df_master.empty:
         st.dataframe(df_stats, use_container_width=True)
 
     with tab2:
-        st.header("🚨 긴급 결원 발생 즉시 배정 (3단계 알고리즘)")
-        st.markdown("**[실시간 추천 우선순위]** 1순위: 해당 병동 경험자 ➔ 2순위: 전체 결원 횟수 최저 (피로도 관리) ➔ 3순위: 무경험자 지원(워밍업) 선제 투입")
+        st.header("🚨 긴급 결원 발생 즉시 배정 (4단계 육성 알고리즘)")
+        st.markdown("""
+        **[마스터 추천 로직 (근무조 무관, 프라임 전 인력 대상)]**
+        * **1순위:** 지원 경험 O / 결원 경험 X ➔ 워밍업 완료! 결원대체로 독립 수행할 최적기 🚀
+        * **2순위:** 지원 경험 O / 결원 경험 O ➔ 안정적이고 완벽히 검증된 결원대체 투입 ✅
+        * **3순위:** 지원 경험 X / 결원 경험 O ➔ 하드랜딩 경험자 (투입은 가능하나 정석 코스는 아님) ⚠️
+        * **4순위:** 해당 병동 경험 전무 ➔ 결원 파견 금지! 반드시 '지원(워밍업)'으로 선제 투입 요망 🌱
+        """)
         st.divider()
         
-        c1, c2, c3 = st.columns(3)
-        target_date = c1.selectbox("결원 발생 일자", sorted(df_req['날짜'].dt.date.unique()))
-        target_shift = c2.selectbox("필요 근무조", ["D", "E"])
-        target_ward = c3.selectbox("결원 발생 병동", sorted(ALL_WARDS))
+        c1, c2 = st.columns(2)
+        target_date = c1.selectbox("결원 발생 일자 (검색 기준일)", sorted(df_req['날짜'].dt.date.unique()))
+        target_ward = c2.selectbox("결원 발생 병동", sorted(ALL_WARDS))
         
-        if st.button("🔍 실시간 최적 인력 추천 가동", type="primary"):
-            avail_pool = df_req[(df_req['날짜'].dt.date == target_date) & (df_req['계획근무조'] == target_shift)]['성함'].tolist()
+        if st.button("🔍 프라임 전체 마스터 랭킹 가동", type="primary"):
+            # 프라임 간호실 모든 인력 불러오기
+            all_prime_nurses = sorted(list(NURSE_TO_BLD.keys()))
             
-            if not avail_pool:
-                st.error("해당 날짜/근무조에 가용 가능한 프라임 인력이 없습니다.")
-            else:
-                recommend_list = []
-                for nurse in avail_pool:
-                    # [핵심] 결원 발생일 '직전'까지의 이력만 조회하여 완벽한 실시간 상황 재현
-                    nurse_hist = df_master[(df_master['성함'] == nurse) & (df_master['날짜'].dt.date < target_date)]
-                    
-                    sup_target = nurse_hist[(nurse_hist['실제병동'] == target_ward) & (nurse_hist['실제역할'] == '지원')].shape[0]
-                    rep_total = nurse_hist[nurse_hist['실제역할'].isin(['결원대체', '⚠️긴급변경(결원)'])].shape[0]
-                    
-                    if sup_target > 0:
-                        priority_tag = "1~2순위 (안전 및 균형)"
-                        role_tag = "✅ 결원대체 투입 적격"
-                        score = 1 
-                    else:
-                        priority_tag = "3순위 (인큐베이팅)"
-                        role_tag = "🌱 지원(워밍업) 파견 권장"
-                        score = 2 
-                        
-                    recommend_list.append({
-                        "간호사 성함": nurse,
-                        "소속": NURSE_TO_BLD.get(nurse, "기타"),
-                        f"[{target_ward}병동] 지원 유경험 (안전)": sup_target,
-                        "총 결원대체 누적 (피로도)": rep_total,
-                        "알고리즘 추천 등급": priority_tag,
-                        "시스템 권장 포지션": role_tag,
-                        "_score": score
-                    })
+            recommend_list = []
+            for nurse in all_prime_nurses:
+                # 결원 발생일 '직전'까지의 이력만 조회하여 실시간 재현
+                nurse_hist = df_master[(df_master['성함'] == nurse) & (df_master['날짜'].dt.date < target_date)]
                 
-                df_rec = pd.DataFrame(recommend_list)
-                df_rec.sort_values(
-                    by=['_score', '총 결원대체 누적 (피로도)', f'[{target_ward}병동] 지원 유경험 (안전)'], 
-                    ascending=[True, True, False], inplace=True
-                )
-                df_rec.drop(columns=['_score'], inplace=True)
-                df_rec.reset_index(drop=True, inplace=True)
-                df_rec.index += 1
+                # 해당 병동 지원 및 결원 횟수 카운트
+                sup_target = nurse_hist[(nurse_hist['실제병동'] == target_ward) & (nurse_hist['실제역할'] == '지원')].shape[0]
+                rep_target = nurse_hist[(nurse_hist['실제병동'] == target_ward) & (nurse_hist['실제역할'].isin(['결원대체', '⚠️긴급변경(결원)']))].shape[0]
                 
-                st.success(f"🏆 {target_ward}병동 {target_shift}근무 결원에 대한 실시간 최적 인력 추천 결과입니다.")
-                st.dataframe(df_rec, use_container_width=True)
+                # 피로도 참고용 총 결원대체 누적
+                rep_total = nurse_hist[nurse_hist['실제역할'].isin(['결원대체', '⚠️긴급변경(결원)'])].shape[0]
                 
-                top_1 = df_rec.iloc[0]
-                if "1~2순위" in top_1['알고리즘 추천 등급']:
-                    st.info(f"💡 **Control Tower 최종 지시:** **{top_1['간호사 성함']} 간호사**를 {target_ward}병동 결원대체로 즉시 투입하십시오. 해당 병동 경험이 있으며, 현재까지의 총 결원대체 피로도({top_1['총 결원대체 누적 (피로도)']}회)가 팀 내에서 가장 안정적인 상태입니다.")
+                # 팀장님의 4단계 우선순위 로직
+                if sup_target > 0 and rep_target == 0:
+                    priority_tag = "1순위 (지원O / 결원X)"
+                    role_tag = "🚀 결원대체 독립수행 최적기"
+                    score = 1
+                elif sup_target > 0 and rep_target > 0:
+                    priority_tag = "2순위 (지원O / 결원O)"
+                    role_tag = "✅ 안정적인 결원 투입"
+                    score = 2
+                elif sup_target == 0 and rep_target > 0:
+                    priority_tag = "3순위 (지원X / 결원O)"
+                    role_tag = "⚠️ 하드랜딩 경험 (투입 가능)"
+                    score = 3
                 else:
-                    st.warning(f"💡 **Control Tower 최종 지시:** 현재 가용 인력 중 {target_ward}병동 경험자가 없습니다. 환자 안전을 위해 아무나 결원대체로 투입하지 마시고, **{top_1['간호사 성함']} 간호사**를 우선 **'지원'**으로 파견하여 적응 훈련(인큐베이팅)을 실시할 것을 권장합니다.")
+                    priority_tag = "4순위 (경험 없음)"
+                    role_tag = "🌱 결원 금지 / 지원(워밍업) 요망"
+                    score = 4
+                    
+                recommend_list.append({
+                    "간호사 성함": nurse,
+                    "소속": NURSE_TO_BLD.get(nurse, "기타"),
+                    f"[{target_ward}병동] 지원 횟수": sup_target,
+                    f"[{target_ward}병동] 결원대체 횟수": rep_target,
+                    "총 결원대체 누적 (참고)": rep_total,
+                    "알고리즘 추천 등급": priority_tag,
+                    "시스템 권장 포지션": role_tag,
+                    "_score": score # 정렬용 숨김 필드
+                })
+            
+            df_rec = pd.DataFrame(recommend_list)
+            
+            # [핵심 정렬 로직] 1. 추천 등급순 -> 2. 지원횟수 적은 순 -> 3. 총 결원대체 피로도 적은 순
+            df_rec.sort_values(
+                by=['_score', f'[{target_ward}병동] 지원 횟수', '총 결원대체 누적 (참고)'], 
+                ascending=[True, True, True], inplace=True
+            )
+            df_rec.drop(columns=['_score'], inplace=True)
+            df_rec.reset_index(drop=True, inplace=True)
+            df_rec.index += 1 # 랭킹 번호 부여
+            
+            st.success(f"🏆 {target_ward}병동 결원에 대한 프라임 간호실 전체 인력 우선순위 마스터 명단입니다.")
+            st.dataframe(df_rec, use_container_width=True)
+            
+            # AI Control Tower 코멘트 자동 생성
+            top_1 = df_rec.iloc[0]
+            if "1순위" in top_1['알고리즘 추천 등급']:
+                st.info(f"💡 **Control Tower 최종 가이드:** **{top_1['간호사 성함']} 간호사**를 {target_ward}병동 결원대체로 투입하는 것이 가장 이상적입니다. 해당 병동에서 '지원'으로 워밍업을 완벽히 마쳤으며, 이제 결원대체로 독립 수행하며 성장할 최고의 타이밍입니다.")
+            elif "2순위" in top_1['알고리즘 추천 등급']:
+                st.info(f"💡 **Control Tower 최종 가이드:** 1순위 인력이 불가할 경우, 이미 {target_ward}병동 지원 및 결원 경험이 모두 있는 안정적인 **{top_1['간호사 성함']} 간호사**를 우선 투입하여 환자 간호의 질을 확보하십시오.")
+            else:
+                st.warning(f"💡 **Control Tower 최종 가이드:** 현재 {target_ward}병동에 결원 투입이 적합한 1, 2순위 경험자가 프라임 내에 매우 부족합니다. 장기적 관점에서 **{top_1['간호사 성함']} 간호사**를 선제적으로 **'지원' 파견**하여 향후 결원 대비를 위한 인큐베이팅을 오늘부터 시작하십시오.")
 else:
     st.info("⬅️ 좌측 사이드바에서 EMR 데이터를 동기화(업로드)하면 실시간 통제 센터가 가동됩니다.")
