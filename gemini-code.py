@@ -16,6 +16,7 @@ NURSE_GROUPS = {
 
 NURSE_TO_BLD = {name: bld for bld, names in NURSE_GROUPS.items() for name in names}
 WARD_TO_BLD = {ward: bld for bld, wards in WARD_GROUPS.items() for ward in wards}
+ALL_WARDS = [w for wards in WARD_GROUPS.values() for w in wards]
 
 # --- [유틸리티 함수] ---
 
@@ -92,7 +93,6 @@ def get_replacement_system_data(uploaded_file):
         
     df.columns = df.columns.str.strip()
     
-    # 사내 시스템 컬럼명 탐색
     c_date = next((c for c in df.columns if '발생일' in c or '날짜' in c), None)
     c_name = next((c for c in df.columns if '대체' in c and '성명' in c), None)
     c_ward = next((c for c in df.columns if '병동' in c), None)
@@ -106,7 +106,6 @@ def get_replacement_system_data(uploaded_file):
                 name_val = str(row[c_name]).strip()
                 ward_val = str(row[c_ward]).strip()
                 
-                # 병동명에서 숫자만 깔끔하게 추출 (예: '105병동' -> '105')
                 ward_nums = re.findall(r'\d+', ward_val)
                 
                 if name_val and name_val not in ['nan', 'None', ''] and ward_nums:
@@ -117,23 +116,6 @@ def get_replacement_system_data(uploaded_file):
                     })
             except: continue
     return pd.DataFrame(rep_list).drop_duplicates()
-
-def recommend_shift_logic(history_list):
-    if not history_list: return "D"
-    last_shift = history_list[-1]
-    count = 0
-    for s in reversed(history_list):
-        if s == last_shift: count += 1
-        else: break
-    return last_shift if count < 2 else ("D" if last_shift == "E" else "E")
-
-def get_recent_history_list(df, nurse_name, target_date):
-    if df.empty: return []
-    target_dt = pd.to_datetime(target_date)
-    start_dt = target_dt - timedelta(weeks=5)
-    hist = df[(df['성함'] == nurse_name) & (df['날짜'] >= start_dt) & (df['날짜'] < target_dt)]
-    if hist.empty: return []
-    return hist.sort_values('날짜').groupby('주차')['계획근무조'].first().tolist()
 
 # --- 메인 UI ---
 st.set_page_config(page_title="프라임 배정 최적화 시스템", layout="wide")
@@ -148,7 +130,7 @@ selected_year = st.sidebar.selectbox("연도", [2026, 2027], index=0)
 selected_month = st.sidebar.selectbox("기준 월", [f"{i}월" for i in range(1, 13)], index=3)
 month_int = int(re.findall(r'\d+', selected_month)[0])
 
-tab1, tab2, tab3, tab4 = st.tabs(["📂 1단계: 업로드", "🔍 2단계: 교차검증", "📊 3단계: 모니터링", "🎯 4단계: 배정 추천"])
+tab1, tab2, tab3, tab4 = st.tabs(["📂 1단계: 업로드", "🔍 2단계: 교차검증", "📊 3단계: 모니터링", "🎯 4단계: 결원대체 마스터 랭킹"])
 
 with tab1:
     st.info("💡 4가지 파일을 모두 업로드하여 교차 검증을 실행하세요.")
@@ -249,53 +231,93 @@ with tab4:
     if not st.session_state.df_master.empty and not st.session_state.df_req_next.empty:
         df_master = st.session_state.df_master
         df_req = st.session_state.df_req_next
-        st.header("🎯 차월 맞춤형(성장 기반) 배정 추천")
-        weeks = sorted(df_req['주차'].unique())
-        selected_week = st.selectbox("배정 주차 선택", weeks)
-        week_info = df_req[df_req['주차'] == selected_week]
-        selected_nurse = st.selectbox("배정할 간호사 선택", sorted(list(NURSE_TO_BLD.keys())))
         
-        col_logic, col_select = st.columns(2)
-        with col_logic:
-            st.subheader("⚙️ 근무조 패턴 분석")
-            hist_list = get_recent_history_list(df_master, selected_nurse, week_info['날짜'].min())
-            rec_shift = recommend_shift_logic(hist_list)
-            st.info(f"💡 피로도 방지 로직 추천 근무: **{rec_shift}**")
-        with col_select:
-            final_shift = st.radio("배정 근무 선택", ["D", "E"], index=0 if rec_shift == "D" else 1, horizontal=True)
-
+        st.header("🎯 결원 발생 병동 기준 전 간호사 마스터 랭킹")
+        st.markdown("""
+        **[팀장님 전용 4단계 인큐베이팅 알고리즘]** (※ 근무조 무관, 전체 프라임 간호사 대상)
+        * **1순위:** 지원 이력 **있음** / 결원 이력 **없음** ➔ 🚀 워밍업 완료! 결원대체 실전 투입 최적기
+        * **2순위:** 지원 이력 **있음** / 결원 이력 **있음** ➔ ✅ 검증된 자원 (안정적 투입 가능)
+        * **3순위:** 지원 이력 **없음** / 결원 이력 **있음** ➔ ⚠️ 하드랜딩 경험자 (워밍업 생략됨)
+        * **4순위:** 지원 이력 **없음** / 결원 이력 **없음** ➔ 🌱 결원대체 **절대 금지** (지원 파견 선행 요망)
+        """)
         st.divider()
-        st.subheader(f"🏥 {selected_nurse} 역량 기반 병동 매칭")
-        allow_switch = st.checkbox("🚩 타 동(Building) 스위치 허용")
         
-        avail_today = df_req[(df_req['주차'] == selected_week) & (df_req['계획근무조'] == final_shift)]
-        if not avail_today.empty:
-            my_bld = NURSE_TO_BLD.get(selected_nurse, "1동")
-            
-            nurse_history = df_master[df_master['성함'] == selected_nurse]
-            sup_dict = nurse_history[nurse_history['실제역할'] == '지원'].groupby('실제병동').size().to_dict()
-            # 결원과 긴급변경 모두 결원대체 경험치로 포함
-            rep_dict = nurse_history[nurse_history['실제역할'].isin(['결원', '⚠️긴급변경'])].groupby('실제병동').size().to_dict()
+        c1, c2 = st.columns(2)
+        # 차월 요청 파일에 있는 날짜들을 추출 (미래 혹은 기준일)
+        req_dates = sorted(df_req['날짜'].dt.date.unique())
+        target_date = c1.selectbox("결원 발생 일자 (검색 기준일)", req_dates)
+        target_ward = c2.selectbox("결원 발생 병동", sorted(ALL_WARDS))
+        
+        if st.button("🔍 전 간호사 마스터 랭킹 가동", type="primary"):
+            # 프라임 간호실 전체 간호사 명단
+            all_prime_nurses = sorted(list(NURSE_TO_BLD.keys()))
             
             recommend_list = []
-            for w in avail_today['계획병동'].unique():
-                if not allow_switch and WARD_TO_BLD.get(w) != my_bld: continue
-                c_sup = sup_dict.get(w, 0)
-                c_rep = rep_dict.get(w, 0)
+            for nurse in all_prime_nurses:
+                # 검색 기준일 '직전'까지의 과거 이력만 조회하여 실시간 상태 재현
+                nurse_hist = df_master[(df_master['성함'] == nurse) & (df_master['날짜'].dt.date < target_date)]
                 
-                priority = "3순위 (인큐베이팅 요망)"
-                if c_sup > 0 and c_rep == 0: priority = "1순위 (안전 최우선/워밍업 완료)"
-                elif c_sup > 0 and c_rep > 0: priority = "2순위 (경험치 균형 체크)"
+                # 해당 병동 '지원' 및 '결원' 횟수 계산
+                sup_count = nurse_hist[(nurse_hist['실제병동'] == target_ward) & (nurse_hist['실제역할'] == '지원')].shape[0]
+                rep_count = nurse_hist[(nurse_hist['실제병동'] == target_ward) & (nurse_hist['실제역할'].isin(['결원', '⚠️긴급변경']))].shape[0]
                 
+                # 피로도 참고용 (전체 병동 결원대체 총합)
+                total_rep = nurse_hist[nurse_hist['실제역할'].isin(['결원', '⚠️긴급변경'])].shape[0]
+                
+                # 4단계 알고리즘 판별
+                if sup_count > 0 and rep_count == 0:
+                    priority_tag = "1순위"
+                    desc = "🚀 실전 투입 최적기 (지원만 O)"
+                    score = 1
+                elif sup_count > 0 and rep_count > 0:
+                    priority_tag = "2순위"
+                    desc = "✅ 검증된 안정 자원 (둘 다 O)"
+                    score = 2
+                elif sup_count == 0 and rep_count > 0:
+                    priority_tag = "3순위"
+                    desc = "⚠️ 하드랜딩 경험자 (결원만 O)"
+                    score = 3
+                else:
+                    priority_tag = "4순위"
+                    desc = "🌱 결원 파견 보류 (경험 전무)"
+                    score = 4
+                    
                 recommend_list.append({
-                    "병동": w, "소속": WARD_TO_BLD.get(w, "기타"), 
-                    "지원(경험) 횟수": c_sup, "결원대체(고난도) 횟수": c_rep,
-                    "배정 알고리즘 추천도": priority
+                    "간호사 성함": nurse,
+                    "소속": NURSE_TO_BLD.get(nurse, "기타"),
+                    f"[{target_ward}병동] 지원 횟수": sup_count,
+                    f"[{target_ward}병동] 결원대체 횟수": rep_count,
+                    "우선순위 그룹": priority_tag,
+                    "상태 진단": desc,
+                    "팀 전체 피로도 (총 결원 횟수)": total_rep,
+                    "_score": score # 보이지 않는 정렬용 키
                 })
                 
-            if recommend_list:
-                res_df = pd.DataFrame(recommend_list).sort_values(by=["결원대체(고난도) 횟수", "배정 알고리즘 추천도"])
-                st.dataframe(res_df, use_container_width=True)
-            else: st.warning("조건에 맞는 병동이 없습니다.")
-        else: st.error("해당 주차 근무조 요청이 없습니다.")
+            df_rec = pd.DataFrame(recommend_list)
+            
+            # 🎯 [핵심 정렬 로직] 
+            # 1. 우선순위 등급순(score) 오름차순 
+            # 2. 같은 순위일 경우 지원 횟수가 적은 사람 오름차순 (방금 막 워밍업 끝낸 사람)
+            # 3. 팀 전체 피로도(총 결원 횟수) 오름차순
+            df_rec.sort_values(
+                by=['_score', f'[{target_ward}병동] 지원 횟수', '팀 전체 피로도 (총 결원 횟수)'], 
+                ascending=[True, True, True], 
+                inplace=True
+            )
+            df_rec.drop(columns=['_score'], inplace=True)
+            df_rec.reset_index(drop=True, inplace=True)
+            df_rec.index += 1 # 랭킹 번호 부여
+            
+            st.success(f"🏆 {target_ward}병동 인력 배정을 위한 프라임 간호실 전체 마스터 랭킹입니다.")
+            st.dataframe(df_rec, use_container_width=True)
+            
+            # AI 요약 코멘트
+            top_1 = df_rec.iloc[0]
+            if "1순위" in top_1['우선순위 그룹']:
+                st.info(f"💡 **AI 배정 가이드:** 1순위인 **{top_1['간호사 성함']} 간호사**를 적극 추천합니다. {target_ward}병동에서 지원 근무로 워밍업({top_1[f'[{target_ward}병동] 지원 횟수']}회)을 마쳤으며, 아직 결원대체 실전 경험이 없어 지금이 완벽하게 독립 수행으로 성장시킬 최적의 타이밍입니다.")
+            elif "2순위" in top_1['우선순위 그룹']:
+                st.info(f"💡 **AI 배정 가이드:** 현재 1순위(지원만 해본 인력)가 없습니다. 안정적인 병동 운영을 위해 이미 해당 병동에 지원 및 결원 경험이 모두 있는 **{top_1['간호사 성함']} 간호사** 배정을 추천합니다.")
+            else:
+                st.warning(f"💡 **AI 배정 가이드:** 팀 내에 {target_ward}병동 정석 훈련자(1, 2순위)가 없습니다. 결원대체보다는 향후 원활한 운영을 위해 **{top_1['간호사 성함']} 간호사** 등 경험 없는 인력을 **'지원(워밍업)'**으로 파견하여 사전 경험을 쌓게 해주세요.")
+                
     else: st.info("1, 2단계를 완료해 주세요.")
