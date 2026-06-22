@@ -22,7 +22,7 @@ WARD_TO_BLD = {ward: bld for bld, wards in WARD_GROUPS.items() for ward in wards
 def expand_generic_data(df):
     """시작일~종료일 범위를 평일 단위 행으로 분리 및 주차 부여"""
     expanded_list = []
-    df.columns = df.columns.str.strip() # 컬럼명 공백 제거
+    df.columns = df.columns.str.strip() 
     required = ['시작일', '종료일', '근무조', '배정병동']
     if not all(any(req in c for c in df.columns) for req in required): return pd.DataFrame()
     
@@ -51,26 +51,18 @@ def expand_generic_data(df):
     return pd.DataFrame(expanded_list)
 
 def get_refined_ward_data(uploaded_file, year, month_int):
-    """[최종 수정] 파일 객체를 직접 읽고, 날짜 중심으로 스캔하여 데이터를 추출"""
-    # 1. 파일 읽기
+    """파일 객체를 직접 읽고, 날짜 중심으로 스캔하여 실제 근무 데이터 추출"""
     if uploaded_file.name.endswith('.csv'):
         df = pd.read_csv(uploaded_file, encoding='utf-8-sig')
     else:
         df = pd.read_excel(uploaded_file)
     
-    # [핵심] 컬럼명 공백 제거
     df.columns = df.columns.str.strip()
+    name_col = '명'
     
-    # 2. 이름/날짜 열 탐색 ('명' 포함 컬럼 찾기)
-    name_col = next((c for c in df.columns if '명' in str(c)), None)
-    if not name_col:
-        st.error(f"파일에서 '명' 열을 찾을 수 없습니다. 현재 컬럼: {list(df.columns)}")
-        return pd.DataFrame()
-        
     day_cols = [c for c in df.columns if '일' in str(c)]
     processed_data = []
     
-    # 3. 날짜 기준 스캔: 날짜 컬럼을 하나씩 훑으며 행을 채우는 방식
     for d_col in day_cols:
         day_match = re.findall(r'\d+', str(d_col))
         if not day_match: continue
@@ -118,7 +110,6 @@ st.title("🏥 프라임 데이터 통합 및 배정 최적화 시스템")
 if 'df_master' not in st.session_state: st.session_state.df_master = pd.DataFrame()
 if 'df_req_next' not in st.session_state: st.session_state.df_req_next = pd.DataFrame()
 
-# 설정
 st.sidebar.header("🛠️ 정제 설정")
 selected_year = st.sidebar.selectbox("연도", [2026, 2027], index=0)
 selected_month = st.sidebar.selectbox("기준 월", [f"{i}월" for i in range(1, 13)], index=3)
@@ -127,7 +118,7 @@ month_int = int(re.findall(r'\d+', selected_month)[0])
 tab1, tab2, tab3, tab4 = st.tabs(["📂 1단계: 업로드", "🔍 2단계: 정제", "📊 3단계: 분석", "🎯 4단계: 배정"])
 
 with tab1:
-    st.info("파일 3개를 모두 업로드하세요.")
+    st.info("💡 파일 3개를 모두 업로드하세요.")
     c1, c2, c3 = st.columns(3)
     file_p = c1.file_uploader("과거 배정표(Plan)", type=["xlsx", "csv"])
     file_a = c2.file_uploader("과거 실제 근무표(Actual)", type=["xlsx", "csv"])
@@ -138,11 +129,10 @@ with tab2:
         if st.button("🚀 데이터 통합 정제 시작"):
             def load_df(f): return pd.read_csv(f) if f.name.endswith('csv') else pd.read_excel(f)
             df_p = expand_generic_data(load_df(file_p))
-            # [최종] 정제 함수 사용
             df_a = get_refined_ward_data(file_a, selected_year, month_int)
             st.session_state.df_master = pd.merge(df_p, df_a, on=['날짜', '성함'], how='left')
             st.session_state.df_req_next = expand_generic_data(load_df(file_r))
-            st.success("✅ 정제 완료!")
+            st.success("✅ 정제 완료! 3, 4단계로 이동하세요.")
     else: st.warning("파일을 모두 업로드해 주세요.")
 
 with tab3:
@@ -155,15 +145,49 @@ with tab3:
         all_nurses = sorted(df_all['성함'].unique())
         all_days = range(1, 32)
         
-        s1, s2, s3 = st.tabs(["1. 지원일수", "2. 배정병동", "3. 실제근무"])
+        s1, s2 = st.tabs(["📊 1. 개인별 누적 이력 집계 (지원 vs 결원대체)", "🔄 2. 일별 매칭 흐름 비교 (계획 ➔ 실제)"])
+        
         with s1:
-            st.dataframe(df.groupby(['성함', '계획병동']).size().unstack(fill_value=0), use_container_width=True)
+            st.subheader("💡 간호사별 병동 누적 이력 현황")
+            selected_nurse_view = st.selectbox("조회할 간호사 선택", all_nurses)
+            nurse_df = df[df['성함'] == selected_nurse_view]
+            
+            # 병동별 계획(지원) 및 실제(결원대체) 횟수 계산
+            p_counts = nurse_df.groupby('계획병동').size().reset_index(name='지원(계획) 횟수')
+            p_counts.rename(columns={'계획병동': '병동'}, inplace=True)
+            
+            a_counts = nurse_df[nurse_df['실제병동'].notna()].groupby('실제병동').size().reset_index(name='결원대체(실제) 횟수')
+            a_counts.rename(columns={'실제병동': '병동'}, inplace=True)
+            
+            summary_res = pd.merge(p_counts, a_counts, on='병동', how='outer').fillna(0)
+            summary_res['지원(계획) 횟수'] = summary_res['지원(계획) 횟수'].astype(int)
+            summary_res['결원대체(실제) 횟수'] = summary_res['결원대체(실제) 횟수'].astype(int)
+            
+            st.dataframe(summary_res, use_container_width=True)
+
         with s2:
-            pivot_plan = df.pivot_table(index='성함', columns=df['날짜'].dt.day, values='계획병동', aggfunc='first').reindex(index=all_nurses, columns=all_days)
-            st.dataframe(pivot_plan, use_container_width=True)
-        with s3:
-            pivot_actual = df.pivot_table(index='성함', columns=df['날짜'].dt.day, values='실제병동', aggfunc='first').reindex(index=all_nurses, columns=all_days)
-            st.dataframe(pivot_actual, use_container_width=True)
+            st.subheader("🔍 일별 매칭 흐름 추적 (형식: 계획병동 ➔ 실제병동)")
+            st.info("💡 예: '131 ➔ 76'은 원래 131병동 지원 계획이었으나 실제 76병동으로 결원대체 투입된 내역입니다.")
+            
+            # 계획 ➔ 실제 흐름 문자열 생성 함수
+            def tracking_flow(row):
+                p = str(row['계획병동']).strip() if pd.notna(row['계획병동']) else "-"
+                a = str(row['실제병동']).strip() if pd.notna(row['실제병동']) else "-"
+                if p == "-" and a == "-": return ""
+                return f"{p} ➔ {a}"
+                
+            df['매칭흐름'] = df.apply(tracking_flow, axis=1)
+            
+            # 피벗 테이블 생성
+            pivot_compare = df.pivot_table(
+                index='성함', 
+                columns=df['날짜'].dt.day, 
+                values='매칭흐름', 
+                aggfunc='first'
+            ).reindex(index=all_nurses, columns=all_days).fillna("")
+            
+            st.dataframe(pivot_compare, use_container_width=True)
+            
     else: st.info("2단계 정제를 실행하세요.")
 
 with tab4:
