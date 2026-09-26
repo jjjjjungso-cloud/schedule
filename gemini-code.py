@@ -6,12 +6,12 @@ from datetime import datetime, timedelta
 # --- [설정 데이터] ---
 WARD_GROUPS = {
     '1동': ['41', '51', '52', '61', '62', '71', '72', '91', '92', '101', '102', '111', '122', '131'],
-    '2동': ['66', '75', '76', '85', '86', '96', '105', '106', '116']
+    '2동': ['66', '75', '76', '85', '86', '96', '105', '106', '116', '29']
 }
 
 NURSE_GROUPS = {
-    '1동': ['정윤정', '기아현', '김유진', '정하라', '김한솔', '최휘영', '박소영', '정예진', '김혜민'],
-    '2동': ['박가영', '홍현의', '김민정', '정소영', '문선희', '엄현지']
+    '1동': ['정윤정', '기아현', '김유진', '정하라', '김한솔', '최휘영', '박소영', '정예진', '김혜민'], # 신규 팀원 추가
+    '2동': ['박가영', '홍현의', '김민정', '정소영', '문선희', '엄현지'] # 신규 팀원 추가
 }
 
 NURSE_TO_BLD = {name: bld for bld, names in NURSE_GROUPS.items() for name in names}
@@ -32,7 +32,7 @@ def expand_generic_data(df):
     c_end = next(c for c in df.columns if '종료일' in c)
     c_shift = next(c for c in df.columns if '근무조' in c)
     c_ward = next(c for c in df.columns if '병동' in c)
-    # 수정: '성함', '성명', '이름' 등 다양한 컬럼명 지원
+    # 이름 컬럼 인식 오류 수정 반영
     c_name = next((c for c in df.columns if any(x in str(c) for x in ['성함', '성명', '이름'])), None)
 
     for _, row in df.iterrows():
@@ -54,15 +54,18 @@ def expand_generic_data(df):
     return pd.DataFrame(expanded_list)
 
 @st.cache_data
-def get_refined_ward_data(df, year, month_int):
+def get_refined_ward_data(df, year, fallback_month_int):
     """실제 근무표(Actual) 파싱"""
     df.columns = df.columns.str.strip()
-    # 수정: '명', '이름', '성함' 등 다양한 컬럼명 지원
+    # 이름 컬럼 인식 오류 수정 반영
     name_col = next((c for c in df.columns if any(x in str(c) for x in ['명', '이름', '성함'])), None)
     if not name_col: return pd.DataFrame()
         
     day_cols = [c for c in df.columns if '일' in str(c)]
     processed_data = []
+    
+    # 누적 파일의 '월' 컬럼 인식 로직 추가
+    month_col = next((c for c in df.columns if '월' in str(c) and len(str(c)) < 3), None)
     
     for d_col in day_cols:
         day_match = re.findall(r'\d+', str(d_col))
@@ -72,6 +75,14 @@ def get_refined_ward_data(df, year, month_int):
         for _, row in df.iterrows():
             name = str(row[name_col]).strip()
             if name in ['nan', 'None', '', '명', '성', '월', '성명', '이름']: continue
+            
+            # 엑셀에 적힌 '월' 우선 적용 로직 추가
+            current_month = fallback_month_int
+            if month_col and pd.notna(row[month_col]):
+                m_match = re.findall(r'\d+', str(row[month_col]))
+                if m_match:
+                    current_month = int(m_match[0])
+
             val = str(row[d_col]).strip()
             if '/' in val:
                 parts = val.split('/')
@@ -79,11 +90,15 @@ def get_refined_ward_data(df, year, month_int):
                     ward_part = parts[1]
                     nums = re.findall(r'\d+', ward_part)
                     if nums:
-                        processed_data.append({
-                            '날짜': datetime(year, month_int, day),
-                            '성함': name,
-                            '실제병동': str(int(nums[0]))
-                        })
+                        try:
+                            processed_data.append({
+                                '날짜': datetime(year, current_month, day),
+                                '성함': name,
+                                '실제병동': str(int(nums[0]))
+                            })
+                        except ValueError:
+                            pass # 2월 30일 등 가짜 날짜 에러 방지
+                            
     return pd.DataFrame(processed_data)
 
 @st.cache_data
@@ -139,8 +154,8 @@ if 'df_req_next' not in st.session_state: st.session_state.df_req_next = pd.Data
 
 # 사이드바 설정
 st.sidebar.header("🛠️ 정제 설정")
-selected_year = st.sidebar.selectbox("연도", [2026, 2027], index=0)
-selected_month = st.sidebar.selectbox("기준 월", [f"{i}월" for i in range(1, 13)], index=3)
+selected_year = st.sidebar.selectbox("연도", [2024, 2025, 2026, 2027], index=2)
+selected_month = st.sidebar.selectbox("기준 월", [f"{i}월" for i in range(1, 13)], index=7)
 month_int = int(re.findall(r'\d+', selected_month)[0])
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
