@@ -10,7 +10,7 @@ WARD_GROUPS = {
 }
 
 NURSE_GROUPS = {
-    '1동': ['정윤정', '기아현', '김유진', '정하라', '김한솔', '최휘영', '박소영'],
+    '1동': ['정윤정', '기아현', '김유진', '정하라', '김한솔', '최휘영', '박소영', '정예진', '김혜민'],
     '2동': ['박가영', '홍현의', '김민정', '정소영', '문선희', '엄현지']
 }
 
@@ -32,7 +32,8 @@ def expand_generic_data(df):
     c_end = next(c for c in df.columns if '종료일' in c)
     c_shift = next(c for c in df.columns if '근무조' in c)
     c_ward = next(c for c in df.columns if '병동' in c)
-    c_name = next((c for c in df.columns if '성함' in c), None)
+    # 수정: '성함', '성명', '이름' 등 다양한 컬럼명 지원
+    c_name = next((c for c in df.columns if any(x in str(c) for x in ['성함', '성명', '이름'])), None)
 
     for _, row in df.iterrows():
         try:
@@ -56,7 +57,8 @@ def expand_generic_data(df):
 def get_refined_ward_data(df, year, month_int):
     """실제 근무표(Actual) 파싱"""
     df.columns = df.columns.str.strip()
-    name_col = next((c for c in df.columns if '명' in str(c)), None)
+    # 수정: '명', '이름', '성함' 등 다양한 컬럼명 지원
+    name_col = next((c for c in df.columns if any(x in str(c) for x in ['명', '이름', '성함'])), None)
     if not name_col: return pd.DataFrame()
         
     day_cols = [c for c in df.columns if '일' in str(c)]
