@@ -6,12 +6,12 @@ from datetime import datetime, timedelta
 # --- [설정 데이터] ---
 WARD_GROUPS = {
     '1동': ['41', '51', '52', '61', '62', '71', '72', '91', '92', '101', '102', '111', '122', '131'],
-    '2동': ['66', '75', '76', '85', '86', '96', '105', '106', '116', '29']
+    '2동': ['66', '75', '76', '85', '86', '96', '105', '106', '116']
 }
 
 NURSE_GROUPS = {
-    '1동': ['정윤정', '기아현', '김유진', '정하라', '김한솔', '최휘영', '박소영', '정예진', '김혜민'], # 신규 팀원 추가
-    '2동': ['박가영', '홍현의', '김민정', '정소영', '문선희', '엄현지'] # 신규 팀원 추가
+    '1동': ['정윤정', '기아현', '김유진', '정하라', '김한솔', '최휘영', '박소영', '김신규'],
+    '2동': ['박가영', '홍현의', '김민정', '정소영', '문선희', '엄현지', '이신입']
 }
 
 NURSE_TO_BLD = {name: bld for bld, names in NURSE_GROUPS.items() for name in names}
@@ -32,7 +32,6 @@ def expand_generic_data(df):
     c_end = next(c for c in df.columns if '종료일' in c)
     c_shift = next(c for c in df.columns if '근무조' in c)
     c_ward = next(c for c in df.columns if '병동' in c)
-    # 이름 컬럼 인식 오류 수정 반영
     c_name = next((c for c in df.columns if any(x in str(c) for x in ['성함', '성명', '이름'])), None)
 
     for _, row in df.iterrows():
@@ -57,14 +56,11 @@ def expand_generic_data(df):
 def get_refined_ward_data(df, year, fallback_month_int):
     """실제 근무표(Actual) 파싱"""
     df.columns = df.columns.str.strip()
-    # 이름 컬럼 인식 오류 수정 반영
     name_col = next((c for c in df.columns if any(x in str(c) for x in ['명', '이름', '성함'])), None)
     if not name_col: return pd.DataFrame()
         
     day_cols = [c for c in df.columns if '일' in str(c)]
     processed_data = []
-    
-    # 누적 파일의 '월' 컬럼 인식 로직 추가
     month_col = next((c for c in df.columns if '월' in str(c) and len(str(c)) < 3), None)
     
     for d_col in day_cols:
@@ -76,7 +72,6 @@ def get_refined_ward_data(df, year, fallback_month_int):
             name = str(row[name_col]).strip()
             if name in ['nan', 'None', '', '명', '성', '월', '성명', '이름']: continue
             
-            # 엑셀에 적힌 '월' 우선 적용 로직 추가
             current_month = fallback_month_int
             if month_col and pd.notna(row[month_col]):
                 m_match = re.findall(r'\d+', str(row[month_col]))
@@ -97,7 +92,7 @@ def get_refined_ward_data(df, year, fallback_month_int):
                                 '실제병동': str(int(nums[0]))
                             })
                         except ValueError:
-                            pass # 2월 30일 등 가짜 날짜 에러 방지
+                            pass 
                             
     return pd.DataFrame(processed_data)
 
@@ -300,8 +295,21 @@ with tab5:
         st.header("🗓️ 차월 스케줄 ➔ 간호사별 대기(지원) 병동 배정")
         st.info("💡 **[간호사 중심]** 특정 간호사를 선택하면, 다음 달 스케줄에서 어느 병동에 '지원(대기)'으로 보내어 성장을 유도할지 추천합니다.")
         
-        weeks = sorted(df_req['주차'].unique())
-        selected_week = st.selectbox("배정 주차 선택", weeks)
+        # 💡 [핵심 추가 포인트] 주차 문자열에서 숫자를 추출해 오름차순으로 완벽하게 정렬합니다 (예: 9주차 -> 10주차)
+        weeks = sorted(df_req['주차'].unique(), key=lambda x: int(re.sub(r'\D', '', str(x))))
+        
+        # 💡 [핵심 추가 포인트] 드롭다운에 표시할 때 해당 주차의 시작일과 종료일을 찾아 함께 표출하는 함수입니다.
+        def format_week_display(w):
+            w_dates = df_req[df_req['주차'] == w]['날짜']
+            if not w_dates.empty:
+                start_str = w_dates.min().strftime('%Y-%m-%d')
+                end_str = w_dates.max().strftime('%Y-%m-%d')
+                return f"{w} ({start_str} ~ {end_str})"
+            return w
+
+        # format_func를 적용하여 화면에 직관적인 날짜 범위를 보여줍니다.
+        selected_week = st.selectbox("배정 주차 선택", weeks, format_func=format_week_display)
+        
         week_info = df_req[df_req['주차'] == selected_week]
         selected_nurse = st.selectbox("배정할 간호사 선택", sorted(list(NURSE_TO_BLD.keys())))
         
@@ -332,7 +340,6 @@ with tab5:
                 c_sup = sup_dict.get(w, 0)
                 c_rep = rep_dict.get(w, 0)
                 
-                # 대기(지원) 병동 추천 로직 (인큐베이팅 우선)
                 priority = "3순위 (이미 충분한 경험)"
                 score = 3
                 if c_sup > 0 and c_rep == 0: 
